@@ -1,0 +1,18 @@
+.git
+.gitignore
+.venv
+__pycache__
+.pytest_cache
+.streamlit/secrets.toml
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+~$*.xlsx
+
+# Keep only the workbook the app actually uses.
+WhatIf_StressTest_v2.xlsx
+WhatIf_StressTest_v3_FullMatrix.xlsx
+stress_test_v1.xlsx
+WhatIf_Stress_Test_Methodology.docx
