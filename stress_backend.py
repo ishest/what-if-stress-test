@@ -103,6 +103,7 @@ DISTRESS_MIN_CURRENT_RATIO = 0.2
 WATCH_MIN_INTEREST_COVERAGE = 5.0
 WATCH_MAX_NET_LEVERAGE = 2.0
 WATCH_MIN_CURRENT_RATIO = 1.0
+CASH_PRESERVATION_MIN = 0.01
 
 
 @dataclass
@@ -998,11 +999,28 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
         + (stressed_payables - base_payables)
     )
     stressed_capex = base_capex * (1 - capex_cut)
-    stressed_dividends = base_dividends * (1 - dividend_cut)
-    stressed_buybacks = base_buybacks * (1 - buyback_cut)
+    scheduled_dividends = base_dividends * (1 - dividend_cut)
+    scheduled_buybacks = base_buybacks * (1 - buyback_cut)
+    stressed_dividends = scheduled_dividends
+    stressed_buybacks = scheduled_buybacks
 
     cash_before_financing = base_cash + stressed_cfo - stressed_capex - stressed_dividends - stressed_buybacks
     ending_cash = cash_before_financing - mandatory_st_repayment - mandatory_lt_repayment
+
+    auto_buyback_cut = 0.0
+    auto_dividend_cut = 0.0
+    if ending_cash < CASH_PRESERVATION_MIN:
+        required_cash = CASH_PRESERVATION_MIN - ending_cash
+        auto_buyback_cut = min(stressed_buybacks, required_cash)
+        stressed_buybacks -= auto_buyback_cut
+        required_cash -= auto_buyback_cut
+        if required_cash > 0:
+            auto_dividend_cut = min(stressed_dividends, required_cash)
+            stressed_dividends -= auto_dividend_cut
+
+        cash_before_financing = base_cash + stressed_cfo - stressed_capex - stressed_dividends - stressed_buybacks
+        ending_cash = cash_before_financing - mandatory_st_repayment - mandatory_lt_repayment
+
     funding_gap = max(0.0, thresholds.minimum_cash_buffer - ending_cash)
 
     ending_equity = base_equity + stressed_net_income - stressed_dividends - stressed_buybacks
@@ -1078,6 +1096,10 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
         )
 
     watch_reasons = []
+    if auto_buyback_cut > 0:
+        watch_reasons.append(f"Buybacks need an automatic cut of {auto_buyback_cut:.1f} to preserve cash")
+    if auto_dividend_cut > 0:
+        watch_reasons.append(f"Dividends need an automatic cut of {auto_dividend_cut:.1f} to preserve cash")
     if watch_flags["Net leverage at or above watch ceiling"] and not critical_flags["Net leverage at or above distress ceiling"]:
         watch_reasons.append(
             f"Net leverage {net_debt_to_ebitda:.2f}x >= watch ceiling {WATCH_MAX_NET_LEVERAGE:.2f}x"
@@ -1206,6 +1228,12 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
                 fallback=0.0,
             ),
             "Stressed Current Ratio": current_ratio,
+            "Scheduled Dividends": scheduled_dividends,
+            "Actual Dividends": stressed_dividends,
+            "Scheduled Buybacks": scheduled_buybacks,
+            "Actual Buybacks": stressed_buybacks,
+            "Automatic Buyback Cut": auto_buyback_cut,
+            "Automatic Dividend Cut": auto_dividend_cut,
             "One-off Cash Charge": one_off_charge,
             "PP&E Impairment": ppe_impairment,
             "Intangible Impairment": intangible_impairment,
