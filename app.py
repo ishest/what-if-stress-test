@@ -9,6 +9,7 @@ import plotly.express as px
 import streamlit as st
 
 from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
+from multiples import build_multiples_snapshot
 from stress_backend import (
     DISTRESS_MAX_NET_LEVERAGE,
     DISTRESS_MIN_CURRENT_RATIO,
@@ -1243,6 +1244,38 @@ def render_ratio_scorecard(dataset):
         st.dataframe(scorecard.category_tables[category], use_container_width=True, hide_index=True)
 
 
+def render_multiples_snapshot(dataset):
+    st.subheader("Multiples")
+    st.caption(
+        "These are current market-value multiples and supporting quality metrics built from live Yahoo market data and the latest annual statements mapped in the app."
+    )
+
+    snapshot = build_multiples_snapshot(dataset)
+
+    if snapshot.summary_cards:
+        summary_cols = st.columns(len(snapshot.summary_cards))
+        for column, card in zip(summary_cols, snapshot.summary_cards):
+            with column:
+                st.metric(card["title"], card["value"])
+
+    if snapshot.notes:
+        with st.expander("Data availability and interpretation notes", expanded=False):
+            for note in snapshot.notes:
+                st.write(f"- {note}")
+
+    with st.expander("Inputs used in the multiples", expanded=False):
+        st.dataframe(snapshot.inputs_table, use_container_width=True, hide_index=True)
+
+    with st.expander("Formulas and methodology", expanded=False):
+        st.dataframe(snapshot.formula_table, use_container_width=True, hide_index=True)
+
+    for category in ["Market Value", "Market Multiples", "Quality & Capital Return"]:
+        if category not in snapshot.category_tables:
+            continue
+        st.markdown(f"**{category}**")
+        st.dataframe(snapshot.category_tables[category], use_container_width=True, hide_index=True)
+
+
 def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds: ThresholdSettings):
     st.subheader("Selected Scenario Dashboard")
     sequence_options = scenario_library["Sequence"].dropna().unique().tolist()
@@ -1682,6 +1715,7 @@ def main():
             "Critical Points",
             "Scenario Explorer",
             "Financial Ratios",
+            "Multiples",
             "Historicals",
             "Scenario Matrix",
             "Sequence Map",
@@ -1706,15 +1740,17 @@ def main():
     with tabs[3]:
         render_ratio_scorecard(dataset)
     with tabs[4]:
-        render_historical(dataset)
+        render_multiples_snapshot(dataset)
     with tabs[5]:
+        render_historical(dataset)
+    with tabs[6]:
         if scenario_matrix is None:
             render_stress_unavailable(stress_error)
         else:
             render_scenario_matrix(dataset, scenario_matrix)
-    with tabs[6]:
-        render_sequence_library(sequence_map)
     with tabs[7]:
+        render_sequence_library(sequence_map)
+    with tabs[8]:
         render_faq()
 
 
