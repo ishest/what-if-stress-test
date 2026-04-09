@@ -215,7 +215,7 @@ def build_critical_points(dataset, dashboard_matrix: pd.DataFrame, thresholds: T
     critical_counts: dict[str, int] = {}
     for status_map in dashboard_matrix["Dashboard Status"]:
         for metric, status in status_map.items():
-            if status != "OK":
+            if status in {"WATCH", "CRITICAL"}:
                 pressure_counts[metric] = pressure_counts.get(metric, 0) + 1
             if status == "CRITICAL":
                 critical_counts[metric] = critical_counts.get(metric, 0) + 1
@@ -1272,7 +1272,7 @@ def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds
         ("Revenue", dataset.latest_values["Revenue"], selected_result["Revenue (Stressed)"], None),
         ("EBITDA", dataset.latest_values["EBITDA"], selected_result["EBITDA (Stressed)"], None),
         ("Net income", dataset.latest_values["Net Income"], selected_result["Net Income (Stressed)"], None),
-        ("FCF", dataset.latest_values["FCF (CFO - Capex)"], selected_result["FCF (Stressed)"], None),
+        ("FCF", dataset.latest_values["FCF (CFO - Capex)"], selected_result["FCF (Stressed)"], selected_result["Dashboard Status"]["FCF"]),
         ("Ending cash", dataset.latest_values["Cash & Equivalents"], selected_result["Ending Cash"], selected_result["Dashboard Status"]["Ending cash"]),
         ("Funding gap", 0.0, selected_result["Funding Gap"], selected_result["Dashboard Status"]["Funding gap"]),
         ("Net debt / EBITDA", dataset.latest_values["Net Leverage"], selected_result["Net Leverage"], selected_result["Dashboard Status"]["Net debt / EBITDA"]),

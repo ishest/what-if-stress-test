@@ -100,6 +100,9 @@ DISTRESS_MIN_ENDING_CASH = 0.0
 DISTRESS_MIN_INTEREST_COVERAGE = 3.0
 DISTRESS_MAX_NET_LEVERAGE = 3.0
 DISTRESS_MIN_CURRENT_RATIO = 0.2
+WATCH_MIN_INTEREST_COVERAGE = 5.0
+WATCH_MAX_NET_LEVERAGE = 2.0
+WATCH_MIN_CURRENT_RATIO = 1.0
 
 
 @dataclass
@@ -1030,8 +1033,10 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
         "Current ratio below company benchmark": current_ratio < thresholds.minimum_current_ratio,
     }
     watch_flags = {
+        "Net leverage at or above watch ceiling": net_debt_to_ebitda >= WATCH_MAX_NET_LEVERAGE,
+        "Interest coverage at or below watch floor": interest_coverage <= WATCH_MIN_INTEREST_COVERAGE,
+        "Current ratio at or below watch floor": current_ratio <= WATCH_MIN_CURRENT_RATIO,
         "FCF negative": fcf < 0,
-        "Funding gap versus company buffer": funding_gap > 0,
     }
 
     critical_reasons = []
@@ -1073,18 +1078,28 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
         )
 
     watch_reasons = []
+    if watch_flags["Net leverage at or above watch ceiling"] and not critical_flags["Net leverage at or above distress ceiling"]:
+        watch_reasons.append(
+            f"Net leverage {net_debt_to_ebitda:.2f}x >= watch ceiling {WATCH_MAX_NET_LEVERAGE:.2f}x"
+        )
+    if watch_flags["Interest coverage at or below watch floor"] and not critical_flags["Interest coverage at or below distress floor"]:
+        watch_reasons.append(
+            f"Interest coverage {interest_coverage:.2f}x <= watch floor {WATCH_MIN_INTEREST_COVERAGE:.2f}x"
+        )
+    if watch_flags["Current ratio at or below watch floor"] and not critical_flags["Current ratio at or below distress floor"]:
+        watch_reasons.append(
+            f"Current ratio {current_ratio:.2f}x <= watch floor {WATCH_MIN_CURRENT_RATIO:.2f}x"
+        )
     if watch_flags["FCF negative"] and not critical_flags["FCF deeply negative"]:
         watch_reasons.append(f"FCF turns negative ({fcf:.1f})")
-    if watch_flags["Funding gap versus company buffer"] and not benchmark_flags["Cash below company buffer"]:
-        watch_reasons.append("Funding gap opens versus the selected company buffer")
 
     if critical_reasons:
         rating = "CRITICAL"
         rating_reasons = critical_reasons
     else:
-        has_watch_pressure = any(benchmark_flags.values()) or any(watch_flags.values())
+        has_watch_pressure = any(watch_flags.values())
         rating = "WATCH" if has_watch_pressure else "RESILIENT"
-        rating_reasons = benchmark_reasons + watch_reasons if has_watch_pressure else []
+        rating_reasons = watch_reasons if has_watch_pressure else []
 
     def _min_metric_status(value: float, benchmark_floor: float, distress_floor: float) -> str:
         if value <= distress_floor:
@@ -1101,32 +1116,33 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
         return "OK"
 
     dashboard_status = {
-        "Ending cash": _min_metric_status(ending_cash, thresholds.minimum_cash_buffer, DISTRESS_MIN_ENDING_CASH),
-        "Funding gap": "CRITICAL" if ending_cash <= DISTRESS_MIN_ENDING_CASH else "WATCH" if funding_gap > 0 else "OK",
+        "Ending cash": "CRITICAL" if ending_cash <= DISTRESS_MIN_ENDING_CASH else "OK",
+        "Funding gap": "INFO" if funding_gap > 0 else "OK",
         "Net debt / EBITDA": _max_metric_status(
             net_debt_to_ebitda,
-            thresholds.maximum_net_leverage,
+            WATCH_MAX_NET_LEVERAGE,
             DISTRESS_MAX_NET_LEVERAGE,
         ),
         "EBIT / interest": _min_metric_status(
             interest_coverage,
-            thresholds.minimum_interest_coverage,
+            WATCH_MIN_INTEREST_COVERAGE,
             DISTRESS_MIN_INTEREST_COVERAGE,
         ),
         "Current ratio": _min_metric_status(
             current_ratio,
-            thresholds.minimum_current_ratio,
+            WATCH_MIN_CURRENT_RATIO,
             DISTRESS_MIN_CURRENT_RATIO,
         ),
+        "FCF": "CRITICAL" if critical_flags["FCF deeply negative"] else "WATCH" if fcf < 0 else "OK",
         "Ending equity": "CRITICAL" if ending_equity < 0 else "OK",
     }
 
     if rating == "CRITICAL":
         overall_assessment = "Financial distress"
-    elif any(benchmark_flags.values()):
-        overall_assessment = "Below company benchmark, but above distress floors"
     elif any(watch_flags.values()):
-        overall_assessment = "Operating pressure, but above distress floors"
+        overall_assessment = "Financial pressure, but above distress floors"
+    elif any(benchmark_flags.values()):
+        overall_assessment = "Below company benchmark, but outside financial pressure and distress zones"
     else:
         overall_assessment = "Within benchmark and above distress floors"
 
