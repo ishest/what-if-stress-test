@@ -98,7 +98,7 @@ STRESS_REQUIRED_FIELDS = [
 
 DISTRESS_MIN_ENDING_CASH = 0.0
 DISTRESS_MIN_INTEREST_COVERAGE = 3.0
-DISTRESS_MAX_NET_LEVERAGE = 4.0
+DISTRESS_MAX_NET_LEVERAGE = 3.0
 DISTRESS_MIN_CURRENT_RATIO = 0.2
 
 
@@ -1016,10 +1016,10 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
     fcf = stressed_cfo - stressed_capex
 
     critical_flags = {
-        "Ending cash below zero": ending_cash < DISTRESS_MIN_ENDING_CASH,
-        "Net leverage above critical ceiling": net_debt_to_ebitda > DISTRESS_MAX_NET_LEVERAGE,
-        "Interest coverage below critical floor": interest_coverage < DISTRESS_MIN_INTEREST_COVERAGE,
-        "Current ratio below critical floor": current_ratio < DISTRESS_MIN_CURRENT_RATIO,
+        "Ending cash at or below zero": ending_cash <= DISTRESS_MIN_ENDING_CASH,
+        "Net leverage at or above distress ceiling": net_debt_to_ebitda >= DISTRESS_MAX_NET_LEVERAGE,
+        "Interest coverage at or below distress floor": interest_coverage <= DISTRESS_MIN_INTEREST_COVERAGE,
+        "Current ratio at or below distress floor": current_ratio <= DISTRESS_MIN_CURRENT_RATIO,
         "Ending equity below zero": ending_equity < 0,
         "FCF deeply negative": fcf < (-0.2 * base_revenue),
     }
@@ -1035,17 +1035,19 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
     }
 
     critical_reasons = []
-    if critical_flags["Ending cash below zero"]:
-        critical_reasons.append(f"Ending cash {ending_cash:.1f} < 0.0")
-    if critical_flags["Net leverage above critical ceiling"]:
-        critical_reasons.append(f"Net leverage {net_debt_to_ebitda:.2f}x > critical ceiling {DISTRESS_MAX_NET_LEVERAGE:.2f}x")
-    if critical_flags["Interest coverage below critical floor"]:
+    if critical_flags["Ending cash at or below zero"]:
+        critical_reasons.append(f"Ending cash {ending_cash:.1f} <= 0.0")
+    if critical_flags["Net leverage at or above distress ceiling"]:
         critical_reasons.append(
-            f"Interest coverage {interest_coverage:.2f}x < critical floor {DISTRESS_MIN_INTEREST_COVERAGE:.2f}x"
+            f"Net leverage {net_debt_to_ebitda:.2f}x >= distress ceiling {DISTRESS_MAX_NET_LEVERAGE:.2f}x"
         )
-    if critical_flags["Current ratio below critical floor"]:
+    if critical_flags["Interest coverage at or below distress floor"]:
         critical_reasons.append(
-            f"Current ratio {current_ratio:.2f}x < critical floor {DISTRESS_MIN_CURRENT_RATIO:.2f}x"
+            f"Interest coverage {interest_coverage:.2f}x <= distress floor {DISTRESS_MIN_INTEREST_COVERAGE:.2f}x"
+        )
+    if critical_flags["Current ratio at or below distress floor"]:
+        critical_reasons.append(
+            f"Current ratio {current_ratio:.2f}x <= distress floor {DISTRESS_MIN_CURRENT_RATIO:.2f}x"
         )
     if critical_flags["Ending equity below zero"]:
         critical_reasons.append("Ending equity < 0")
@@ -1085,14 +1087,14 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
         rating_reasons = benchmark_reasons + watch_reasons if has_watch_pressure else []
 
     def _min_metric_status(value: float, benchmark_floor: float, distress_floor: float) -> str:
-        if value < distress_floor:
+        if value <= distress_floor:
             return "CRITICAL"
         if value < benchmark_floor:
             return "WATCH"
         return "OK"
 
     def _max_metric_status(value: float, benchmark_ceiling: float, distress_ceiling: float) -> str:
-        if value > distress_ceiling:
+        if value >= distress_ceiling:
             return "CRITICAL"
         if value > benchmark_ceiling:
             return "WATCH"
@@ -1100,7 +1102,7 @@ def run_scenario(latest: dict[str, float], scenario_row: pd.Series, thresholds: 
 
     dashboard_status = {
         "Ending cash": _min_metric_status(ending_cash, thresholds.minimum_cash_buffer, DISTRESS_MIN_ENDING_CASH),
-        "Funding gap": "CRITICAL" if ending_cash < DISTRESS_MIN_ENDING_CASH else "WATCH" if funding_gap > 0 else "OK",
+        "Funding gap": "CRITICAL" if ending_cash <= DISTRESS_MIN_ENDING_CASH else "WATCH" if funding_gap > 0 else "OK",
         "Net debt / EBITDA": _max_metric_status(
             net_debt_to_ebitda,
             thresholds.maximum_net_leverage,

@@ -344,7 +344,7 @@ def build_base_threshold_status(dataset, thresholds: ThresholdSettings) -> tuple
             "Distress Raw": DISTRESS_MIN_ENDING_CASH,
             "Base": format_m(latest["Cash & Equivalents"]),
             "Company Benchmark": f">= {format_m(thresholds.minimum_cash_buffer)}",
-            "Distress Floor / Ceiling": ">= 0.0",
+            "Distress Zone": "<= 0.0",
             "kind": "min",
         },
         {
@@ -354,7 +354,7 @@ def build_base_threshold_status(dataset, thresholds: ThresholdSettings) -> tuple
             "Distress Raw": DISTRESS_MAX_NET_LEVERAGE,
             "Base": format_ratio(latest["Net Leverage"]),
             "Company Benchmark": f"<= {thresholds.maximum_net_leverage:.2f}x",
-            "Distress Floor / Ceiling": f"<= {DISTRESS_MAX_NET_LEVERAGE:.2f}x",
+            "Distress Zone": f">= {DISTRESS_MAX_NET_LEVERAGE:.2f}x",
             "kind": "max",
         },
         {
@@ -364,7 +364,7 @@ def build_base_threshold_status(dataset, thresholds: ThresholdSettings) -> tuple
             "Distress Raw": DISTRESS_MIN_INTEREST_COVERAGE,
             "Base": format_ratio(latest["Interest Coverage"]),
             "Company Benchmark": f">= {thresholds.minimum_interest_coverage:.2f}x",
-            "Distress Floor / Ceiling": f">= {DISTRESS_MIN_INTEREST_COVERAGE:.2f}x",
+            "Distress Zone": f"<= {DISTRESS_MIN_INTEREST_COVERAGE:.2f}x",
             "kind": "min",
         },
         {
@@ -374,7 +374,7 @@ def build_base_threshold_status(dataset, thresholds: ThresholdSettings) -> tuple
             "Distress Raw": DISTRESS_MIN_CURRENT_RATIO,
             "Base": format_ratio(current_ratio),
             "Company Benchmark": f">= {thresholds.minimum_current_ratio:.2f}x",
-            "Distress Floor / Ceiling": f">= {DISTRESS_MIN_CURRENT_RATIO:.2f}x",
+            "Distress Zone": f"<= {DISTRESS_MIN_CURRENT_RATIO:.2f}x",
             "kind": "min",
         },
     ]
@@ -385,30 +385,30 @@ def build_base_threshold_status(dataset, thresholds: ThresholdSettings) -> tuple
         distress_raw = spec["Distress Raw"]
         if spec["kind"] == "min":
             benchmark_ok = base_raw >= benchmark_raw
-            distress_ok = base_raw >= distress_raw
+            distress_ok = base_raw > distress_raw
         else:
             benchmark_ok = base_raw <= benchmark_raw
-            distress_ok = base_raw <= distress_raw
+            distress_ok = base_raw < distress_raw
 
         if not distress_ok:
             interpretation = "Below hard distress floor / beyond hard distress ceiling."
             distress_issues.append(
-                f"{spec['Metric']} {spec['Base']} is already beyond the hard distress limit {spec['Distress Floor / Ceiling']}."
+                f"{spec['Metric']} {spec['Base']} is already in the distress zone {spec['Distress Zone']}."
             )
         elif not benchmark_ok:
             interpretation = "Below the company benchmark, but still within normal financial safety limits."
             benchmark_gaps.append(
-                f"{spec['Metric']} {spec['Base']} is below the company benchmark {spec['Company Benchmark']}, but still within the hard distress limit {spec['Distress Floor / Ceiling']}."
+                f"{spec['Metric']} {spec['Base']} is below the company benchmark {spec['Company Benchmark']}, but still outside the distress zone {spec['Distress Zone']}."
             )
         else:
-            interpretation = "Above the company benchmark and above the hard distress floor."
+            interpretation = "Above the company benchmark and outside the distress zone."
 
         rows.append(
             {
                 "Metric": spec["Metric"],
                 "Base": spec["Base"],
                 "Company Benchmark": spec["Company Benchmark"],
-                "Distress Floor / Ceiling": spec["Distress Floor / Ceiling"],
+                "Distress Zone": spec["Distress Zone"],
                 "Benchmark Status": "OK" if benchmark_ok else "WATCH",
                 "Distress Status": "SAFE" if distress_ok else "CRITICAL",
                 "Interpretation": interpretation,
@@ -924,7 +924,7 @@ def render_result_explanation(dataset, dashboard_matrix: pd.DataFrame, threshold
             "Metric",
             "Base",
             "Company Benchmark",
-            "Distress Floor / Ceiling",
+            "Distress Zone",
             "Benchmark Status",
             "Distress Status",
             "Interpretation",
@@ -1106,7 +1106,7 @@ def render_key_critical_points(dataset, dashboard_matrix: pd.DataFrame, threshol
                 "Metric",
                 "Base",
                 "Company Benchmark",
-                "Distress Floor / Ceiling",
+                "Distress Zone",
                 "Benchmark Status",
                 "Distress Status",
                 "Interpretation",
