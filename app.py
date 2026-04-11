@@ -39,15 +39,18 @@ SEVERITY_ORDER = {"Light": 1, "Base": 2, "Severe": 3}
 RATING_ORDER = {"CRITICAL": 1, "WATCH": 2, "RESILIENT": 3}
 SEVERITY_BG = {"Light": "#d9efe1", "Base": "#f8e8c8", "Severe": "#f6d7d7"}
 RATING_BG = {"CRITICAL": "#c53d2d", "WATCH": "#f2a31b", "RESILIENT": "#23863a"}
-HEATMAP_METRIC_ORDER = [
-    "Overall rating",
-    "EBIT / interest",
-    "Net debt / EBITDA",
-    "Current ratio",
-    "FCF",
-    "Ending cash",
-    "Ending equity",
+HEATMAP_OVERALL_KEY = "__overall__"
+HEATMAP_OVERALL_LABEL = "Overall"
+HEATMAP_METRIC_SPECS = [
+    ("EBIT / interest", "EBIT / int"),
+    ("Net debt / EBITDA", "Net lev."),
+    ("Current ratio", "Curr. ratio"),
+    ("FCF", "FCF"),
+    ("Ending cash", "End cash"),
+    ("Ending equity", "End equity"),
 ]
+HEATMAP_SEVERITY_SHORT = {"Light": "L", "Base": "B", "Severe": "S"}
+HEATMAP_SEVERITY_WEIGHT = {"Light": 3, "Base": 2, "Severe": 1}
 HEATMAP_STATUS_SCORE = {"RESILIENT": 0, "WATCH": 1, "CRITICAL": 2}
 HEATMAP_COLORSCALE = [
     (0.00, RATING_BG["RESILIENT"]),
@@ -71,6 +74,16 @@ THRESHOLD_WIDGET_KEYS = {
     "maximum_net_leverage": "threshold_maximum_net_leverage",
     "minimum_current_ratio": "threshold_minimum_current_ratio",
 }
+
+
+def _status_from_score(score: float | int | None) -> str:
+    if score is None or pd.isna(score):
+        return "RESILIENT"
+    if score >= 2:
+        return "CRITICAL"
+    if score >= 1:
+        return "WATCH"
+    return "RESILIENT"
 
 
 @dataclass
@@ -351,36 +364,41 @@ def build_critical_points(dataset, dashboard_matrix: pd.DataFrame, thresholds: T
 
     for sequence, group in dashboard_matrix.groupby("Sequence", sort=False):
         ordered = group.sort_values("Severity Order")
+        sequence_order = int(ordered["Sequence Order"].iloc[0]) if not ordered.empty else 999
 
-        overall_path = [(row["Severity"], row["Rating"]) for _, row in ordered.iterrows()]
-        for metric in HEATMAP_METRIC_ORDER:
-            if metric == "Overall rating":
-                path = overall_path
-            else:
-                path = [
-                    (row["Severity"], _normalize_metric_status(row["Dashboard Status"].get(metric, "OK")))
-                    for _, row in ordered.iterrows()
-                ]
+        for _, row in ordered.iterrows():
+            severity = row["Severity"]
+            severity_order = int(row["Severity Order"])
 
-            scores = [HEATMAP_STATUS_SCORE.get(status, 0) for _, status in path]
-            worst_score = max(scores) if scores else 0
-            worst_status = next(
-                (status for status, score in HEATMAP_STATUS_SCORE.items() if score == worst_score),
-                "RESILIENT",
-            )
-            first_non_resilient = next((severity for severity, status in path if status in {"WATCH", "CRITICAL"}), "None")
-            first_critical = next((severity for severity, status in path if status == "CRITICAL"), "None")
             heatmap_rows.append(
                 {
                     "Sequence": sequence,
-                    "Metric": metric,
-                    "Status": worst_status,
-                    "Status Score": worst_score,
-                    "First non-resilient severity": first_non_resilient,
-                    "First critical severity": first_critical,
-                    "Severity path": " | ".join(f"{severity}: {status}" for severity, status in path),
+                    "Sequence Order": sequence_order,
+                    "Severity": severity,
+                    "Severity Order": severity_order,
+                    "Severity Short": HEATMAP_SEVERITY_SHORT.get(severity, severity[:1]),
+                    "Metric Key": HEATMAP_OVERALL_KEY,
+                    "Metric Label": HEATMAP_OVERALL_LABEL,
+                    "Status": row["Rating"],
+                    "Status Score": HEATMAP_STATUS_SCORE.get(row["Rating"], 0),
                 }
             )
+
+            for metric_key, metric_label in HEATMAP_METRIC_SPECS:
+                metric_status = _normalize_metric_status(row["Dashboard Status"].get(metric_key, "OK"))
+                heatmap_rows.append(
+                    {
+                        "Sequence": sequence,
+                        "Sequence Order": sequence_order,
+                        "Severity": severity,
+                        "Severity Order": severity_order,
+                        "Severity Short": HEATMAP_SEVERITY_SHORT.get(severity, severity[:1]),
+                        "Metric Key": metric_key,
+                        "Metric Label": metric_label,
+                        "Status": metric_status,
+                        "Status Score": HEATMAP_STATUS_SCORE.get(metric_status, 0),
+                    }
+                )
 
     heatmap_df = pd.DataFrame(heatmap_rows)
 
@@ -396,58 +414,238 @@ def build_critical_points(dataset, dashboard_matrix: pd.DataFrame, thresholds: T
 
 def render_failure_heatmap(heatmap_df: pd.DataFrame):
     st.markdown("**Failure Heatmap**")
+    control_col1, control_col2 = st.columns([1.4, 1.2])
+    with control_col1:
+        heatmap_view = st.segmented_control(
+            "View",
+            ["Worst case view", "By severity"],
+            default="Worst case view",
+            key="critical_points_heatmap_view",
+            width="stretch",
+        )
+    with control_col2:
+        heatmap_sort = st.segmented_control(
+            "Sort rows",
+            ["Fragility", "Scenario order"],
+            default="Fragility",
+            key="critical_points_heatmap_sort",
+            width="stretch",
+        )
+
     st.caption(
-        "Each row is a stress sequence. Each cell shows the worst status that metric reaches across Light, Base, and Severe. "
-        "Green means the metric stays resilient, amber means it moves into pressure, and red means it reaches a hard distress zone."
+        "Click any cell to preload the Scenario Explorer. Green means resilient, amber means pressure, and red means the metric reaches a hard distress zone."
     )
 
     if heatmap_df.empty:
         st.info("No heatmap is available because there are no scenario results to summarize.")
         return
 
-    sequence_order = heatmap_df["Sequence"].drop_duplicates().tolist()
+    non_overall = heatmap_df[heatmap_df["Metric Key"] != HEATMAP_OVERALL_KEY].copy()
+    summary_rows = []
+    for sequence, group in heatmap_df.groupby("Sequence", sort=False):
+        non_overall_group = group[group["Metric Key"] != HEATMAP_OVERALL_KEY].copy()
+        overall_group = group[group["Metric Key"] == HEATMAP_OVERALL_KEY].copy()
+        summary_rows.append(
+            {
+                "Sequence": sequence,
+                "Sequence Order": int(group["Sequence Order"].iloc[0]),
+                "Critical Cells": int((non_overall_group["Status"] == "CRITICAL").sum()),
+                "Pressure Cells": int(non_overall_group["Status"].isin(["WATCH", "CRITICAL"]).sum()),
+                "Fragility Score": float(
+                    (
+                        non_overall_group["Status Score"]
+                        * non_overall_group["Severity"].map(HEATMAP_SEVERITY_WEIGHT).fillna(1)
+                    ).sum()
+                ),
+                "Worst Overall Score": int(overall_group["Status Score"].max()) if not overall_group.empty else 0,
+                "First Overall Pressure Order": int(overall_group.loc[overall_group["Status"].isin(["WATCH", "CRITICAL"]), "Severity Order"].min()) if overall_group["Status"].isin(["WATCH", "CRITICAL"]).any() else 99,
+                "First Overall Critical Order": int(overall_group.loc[overall_group["Status"] == "CRITICAL", "Severity Order"].min()) if (overall_group["Status"] == "CRITICAL").any() else 99,
+            }
+        )
+    summary_df = pd.DataFrame(summary_rows)
+    if heatmap_sort == "Fragility":
+        sequence_order = summary_df.sort_values(
+            [
+                "Worst Overall Score",
+                "First Overall Critical Order",
+                "Critical Cells",
+                "Pressure Cells",
+                "Fragility Score",
+                "Sequence Order",
+            ],
+            ascending=[False, True, False, False, False, True],
+        )["Sequence"].tolist()
+    else:
+        sequence_order = summary_df.sort_values("Sequence Order")["Sequence"].tolist()
+
+    overall_summary_rows = []
+    overall_detail = heatmap_df[heatmap_df["Metric Key"] == HEATMAP_OVERALL_KEY].copy()
+    for sequence, group in overall_detail.groupby("Sequence", sort=False):
+        ordered = group.sort_values("Severity Order")
+        scores = ordered["Status Score"].tolist()
+        worst_score = max(scores) if scores else 0
+        worst_status = _status_from_score(worst_score)
+        first_non_resilient = ordered.loc[ordered["Status"].isin(["WATCH", "CRITICAL"]), "Severity"].iloc[0] if ordered["Status"].isin(["WATCH", "CRITICAL"]).any() else "None"
+        first_critical = ordered.loc[ordered["Status"] == "CRITICAL", "Severity"].iloc[0] if (ordered["Status"] == "CRITICAL").any() else "None"
+        target_severity = first_critical if first_critical != "None" else first_non_resilient if first_non_resilient != "None" else "Light"
+        overall_summary_rows.append(
+            {
+                "Sequence": sequence,
+                "Column Label": HEATMAP_OVERALL_LABEL,
+                "Status": worst_status,
+                "Status Score": worst_score,
+                "Target Severity": target_severity,
+                "Metric Key": HEATMAP_OVERALL_KEY,
+                "Metric Label": HEATMAP_OVERALL_LABEL,
+                "Trigger Detail": (
+                    "Remains resilient in Light, Base, and Severe."
+                    if worst_status == "RESILIENT"
+                    else f"First non-resilient at {first_non_resilient}."
+                    if worst_status == "WATCH"
+                    else f"First non-resilient at {first_non_resilient}; first critical at {first_critical}."
+                ),
+                "Severity Path": " | ".join(f"{row['Severity']}: {row['Status']}" for _, row in ordered.iterrows()),
+            }
+        )
+    overall_summary_df = pd.DataFrame(overall_summary_rows)
+
+    if heatmap_view == "Worst case view":
+        display_rows = []
+        for sequence, group in non_overall.groupby("Sequence", sort=False):
+            for metric_key, metric_label in HEATMAP_METRIC_SPECS:
+                metric_group = group[group["Metric Key"] == metric_key].sort_values("Severity Order")
+                scores = metric_group["Status Score"].tolist()
+                worst_score = max(scores) if scores else 0
+                worst_status = _status_from_score(worst_score)
+                first_non_resilient = metric_group.loc[metric_group["Status"].isin(["WATCH", "CRITICAL"]), "Severity"].iloc[0] if metric_group["Status"].isin(["WATCH", "CRITICAL"]).any() else "None"
+                first_critical = metric_group.loc[metric_group["Status"] == "CRITICAL", "Severity"].iloc[0] if (metric_group["Status"] == "CRITICAL").any() else "None"
+                target_severity = first_critical if first_critical != "None" else first_non_resilient if first_non_resilient != "None" else "Light"
+                display_rows.append(
+                    {
+                        "Sequence": sequence,
+                        "Column Label": metric_label,
+                        "Status": worst_status,
+                        "Status Score": worst_score,
+                        "Target Severity": target_severity,
+                        "Metric Key": metric_key,
+                        "Metric Label": metric_label,
+                        "Trigger Detail": (
+                            "Remains resilient in Light, Base, and Severe."
+                            if worst_status == "RESILIENT"
+                            else f"First non-resilient at {first_non_resilient}."
+                            if worst_status == "WATCH"
+                            else f"First non-resilient at {first_non_resilient}; first critical at {first_critical}."
+                        ),
+                        "Severity Path": " | ".join(f"{row['Severity']}: {row['Status']}" for _, row in metric_group.iterrows()),
+                    }
+                )
+        display_df = pd.DataFrame(display_rows)
+        if not overall_summary_df.empty:
+            display_df = pd.concat([display_df, overall_summary_df], ignore_index=True)
+        column_order = [label for _, label in HEATMAP_METRIC_SPECS] + [HEATMAP_OVERALL_LABEL]
+    else:
+        severity_display = non_overall.copy()
+        severity_display["Column Label"] = severity_display.apply(
+            lambda row: f"{row['Metric Label']}<br>{row['Severity Short']}",
+            axis=1,
+        )
+        severity_display["Target Severity"] = severity_display["Severity"]
+        severity_display["Trigger Detail"] = severity_display.apply(
+            lambda row: (
+                f"Selected severity {row['Severity']} stays resilient."
+                if row["Status"] == "RESILIENT"
+                else f"Selected severity {row['Severity']} is in WATCH."
+                if row["Status"] == "WATCH"
+                else f"Selected severity {row['Severity']} is CRITICAL."
+            ),
+            axis=1,
+        )
+        path_lookup = (
+            non_overall.sort_values("Severity Order")
+            .groupby(["Sequence", "Metric Key"])["Status"]
+            .agg(list)
+            .to_dict()
+        )
+        severity_display["Severity Path"] = severity_display.apply(
+            lambda row: " | ".join(
+                f"{severity}: {status}"
+                for severity, status in zip(
+                    ["Light", "Base", "Severe"],
+                    path_lookup.get((row["Sequence"], row["Metric Key"]), []),
+                )
+            ),
+            axis=1,
+        )
+        display_df = severity_display[
+            [
+                "Sequence",
+                "Column Label",
+                "Status",
+                "Status Score",
+                "Target Severity",
+                "Metric Key",
+                "Metric Label",
+                "Trigger Detail",
+                "Severity Path",
+            ]
+        ].copy()
+        if not overall_summary_df.empty:
+            display_df = pd.concat([display_df, overall_summary_df], ignore_index=True)
+        column_order = [
+            f"{metric_label}<br>{HEATMAP_SEVERITY_SHORT[severity]}"
+            for metric_key, metric_label in HEATMAP_METRIC_SPECS
+            for severity in ["Light", "Base", "Severe"]
+        ] + [HEATMAP_OVERALL_LABEL]
+
     score_matrix = (
-        heatmap_df.pivot(index="Sequence", columns="Metric", values="Status Score")
-        .reindex(index=sequence_order, columns=HEATMAP_METRIC_ORDER)
+        display_df.pivot(index="Sequence", columns="Column Label", values="Status Score")
+        .reindex(index=sequence_order, columns=column_order)
         .fillna(0)
     )
     status_matrix = (
-        heatmap_df.pivot(index="Sequence", columns="Metric", values="Status")
-        .reindex(index=sequence_order, columns=HEATMAP_METRIC_ORDER)
+        display_df.pivot(index="Sequence", columns="Column Label", values="Status")
+        .reindex(index=sequence_order, columns=column_order)
         .fillna("RESILIENT")
     )
     trigger_matrix = (
-        heatmap_df.assign(
-            TriggerDetail=heatmap_df.apply(
-                lambda row: (
-                    "Remains resilient in Light, Base, and Severe."
-                    if row["Status"] == "RESILIENT"
-                    else f"First non-resilient at {row['First non-resilient severity']}."
-                    if row["Status"] == "WATCH"
-                    else f"First non-resilient at {row['First non-resilient severity']}; first critical at {row['First critical severity']}."
-                ),
-                axis=1,
-            )
-        )
-        .pivot(index="Sequence", columns="Metric", values="TriggerDetail")
-        .reindex(index=sequence_order, columns=HEATMAP_METRIC_ORDER)
+        display_df.pivot(index="Sequence", columns="Column Label", values="Trigger Detail")
+        .reindex(index=sequence_order, columns=column_order)
         .fillna("")
     )
     path_matrix = (
-        heatmap_df.pivot(index="Sequence", columns="Metric", values="Severity path")
-        .reindex(index=sequence_order, columns=HEATMAP_METRIC_ORDER)
+        display_df.pivot(index="Sequence", columns="Column Label", values="Severity Path")
+        .reindex(index=sequence_order, columns=column_order)
         .fillna("")
+    )
+    target_severity_matrix = (
+        display_df.pivot(index="Sequence", columns="Column Label", values="Target Severity")
+        .reindex(index=sequence_order, columns=column_order)
+        .fillna("Light")
+    )
+    metric_key_matrix = (
+        display_df.pivot(index="Sequence", columns="Column Label", values="Metric Key")
+        .reindex(index=sequence_order, columns=column_order)
+        .fillna(HEATMAP_OVERALL_KEY)
+    )
+    metric_label_matrix = (
+        display_df.pivot(index="Sequence", columns="Column Label", values="Metric Label")
+        .reindex(index=sequence_order, columns=column_order)
+        .fillna(HEATMAP_OVERALL_LABEL)
     )
 
     customdata = []
     for sequence in sequence_order:
         custom_row = []
-        for metric in HEATMAP_METRIC_ORDER:
+        for column in column_order:
             custom_row.append(
                 [
-                    status_matrix.loc[sequence, metric],
-                    trigger_matrix.loc[sequence, metric],
-                    path_matrix.loc[sequence, metric],
+                    sequence,
+                    metric_key_matrix.loc[sequence, column],
+                    target_severity_matrix.loc[sequence, column],
+                    status_matrix.loc[sequence, column],
+                    trigger_matrix.loc[sequence, column],
+                    path_matrix.loc[sequence, column],
+                    metric_label_matrix.loc[sequence, column],
                 ]
             )
         customdata.append(custom_row)
@@ -455,7 +653,7 @@ def render_failure_heatmap(heatmap_df: pd.DataFrame):
     fig = go.Figure(
         data=go.Heatmap(
             z=score_matrix.values,
-            x=HEATMAP_METRIC_ORDER,
+            x=column_order,
             y=sequence_order,
             colorscale=HEATMAP_COLORSCALE,
             zmin=0,
@@ -465,11 +663,11 @@ def render_failure_heatmap(heatmap_df: pd.DataFrame):
             ygap=2,
             showscale=False,
             hovertemplate=(
-                "<b>%{y}</b><br>"
-                "Metric: %{x}<br>"
-                "Worst status: %{customdata[0]}<br>"
-                "%{customdata[1]}<br>"
-                "Path: %{customdata[2]}"
+                "<b>%{customdata[0]}</b><br>"
+                "Metric: %{customdata[6]}<br>"
+                "Status: %{customdata[3]}<br>"
+                "%{customdata[4]}<br>"
+                "Path: %{customdata[5]}"
                 "<extra></extra>"
             ),
         )
@@ -481,7 +679,42 @@ def render_failure_heatmap(heatmap_df: pd.DataFrame):
         yaxis_title="Stress sequence",
         yaxis=dict(autorange="reversed"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_xaxes(side="top", tickangle=0, tickfont=dict(size=11))
+    event = st.plotly_chart(
+        fig,
+        key="critical_points_failure_heatmap",
+        on_select="rerun",
+        selection_mode="points",
+        width="stretch",
+    )
+
+    selection_state = event.selection if hasattr(event, "selection") else event.get("selection", {})
+    points = selection_state.get("points", []) if isinstance(selection_state, dict) else getattr(selection_state, "points", [])
+    if points:
+        custom = points[-1].get("customdata", [])
+        if len(custom) >= 7:
+            st.session_state["scenario_explorer_sequence"] = custom[0]
+            st.session_state["scenario_explorer_severity"] = custom[2]
+            st.session_state["scenario_explorer_metric"] = custom[1]
+            st.session_state["scenario_explorer_metric_label"] = custom[6]
+            st.session_state["scenario_explorer_source"] = "failure_heatmap"
+            st.session_state["critical_points_heatmap_selection"] = {
+                "sequence": custom[0],
+                "severity": custom[2],
+                "metric_key": custom[1],
+                "metric_label": custom[6],
+                "status": custom[3],
+                "trigger_detail": custom[4],
+                "path": custom[5],
+            }
+
+    selected_cell = st.session_state.get("critical_points_heatmap_selection")
+    if selected_cell:
+        st.info(
+            f"Selected `{selected_cell['sequence']}` -> `{selected_cell['metric_label']}` as `{selected_cell['status']}`. "
+            f"Scenario Explorer is preloaded with `{selected_cell['severity']}` for the same sequence."
+        )
+        st.caption(f"{selected_cell['trigger_detail']} Path: {selected_cell['path']}")
 
 
 def build_base_threshold_status(dataset, thresholds: ThresholdSettings) -> tuple[pd.DataFrame, list[str], list[str]]:
@@ -1436,17 +1669,25 @@ def render_multiples_snapshot(dataset):
 def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds: ThresholdSettings):
     st.subheader("Selected Scenario Dashboard")
     sequence_options = scenario_library["Sequence"].dropna().unique().tolist()
+    default_sequence = "Demand collapse (classic recession)" if "Demand collapse (classic recession)" in sequence_options else sequence_options[0]
+    if st.session_state.get("scenario_explorer_sequence") not in sequence_options:
+        st.session_state["scenario_explorer_sequence"] = default_sequence
+    if st.session_state.get("scenario_explorer_severity") not in {"Light", "Base", "Severe"}:
+        st.session_state["scenario_explorer_severity"] = "Base"
 
     selector_col, severity_col, description_col = st.columns([1.6, 1.0, 2.4])
     with selector_col:
-        selected_sequence = st.selectbox("Sequence", options=sequence_options, index=max(sequence_options.index("Demand collapse (classic recession)"), 0) if "Demand collapse (classic recession)" in sequence_options else 0)
+        selected_sequence = st.selectbox("Sequence", options=sequence_options, key="scenario_explorer_sequence")
     with severity_col:
-        selected_severity = st.selectbox("Severity", options=["Light", "Base", "Severe"], index=1)
+        selected_severity = st.selectbox("Severity", options=["Light", "Base", "Severe"], key="scenario_explorer_severity")
 
     selected_row = get_selected_scenario(scenario_library, selected_sequence, selected_severity)
     selected_result = run_scenario(dataset.latest_values, selected_row, thresholds)
 
     with description_col:
+        if st.session_state.get("scenario_explorer_source") == "failure_heatmap":
+            focus_metric = st.session_state.get("scenario_explorer_metric_label", "Selected metric")
+            st.caption(f"Preloaded from the failure heatmap. Current focus: `{focus_metric}`.")
         st.markdown("**Cause → effect chain**")
         st.write(selected_row["Cause -> Effect Chain"])
         st.markdown("**Rating**")
@@ -1502,7 +1743,18 @@ def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds
     formatted_dashboard = dashboard_df.copy()
     for column in ["Base", "Stressed", "Delta"]:
         formatted_dashboard[column] = [_fmt_metric(metric, value) for metric, value in zip(formatted_dashboard["Metric"], formatted_dashboard[column])]
-    st.dataframe(formatted_dashboard, use_container_width=True, hide_index=True)
+    focus_metric_key = st.session_state.get("scenario_explorer_metric")
+    if focus_metric_key and focus_metric_key in set(formatted_dashboard["Metric"]):
+        styled_dashboard = formatted_dashboard.style.apply(
+            lambda row: [
+                "background-color: #fff6db; font-weight: 700;" if row["Metric"] == focus_metric_key else ""
+                for _ in row
+            ],
+            axis=1,
+        )
+        st.dataframe(styled_dashboard, use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(formatted_dashboard, use_container_width=True, hide_index=True)
 
     stress_detail = selected_result["Stress Detail"]
     chart_df = pd.DataFrame(
