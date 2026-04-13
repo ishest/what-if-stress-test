@@ -20,6 +20,7 @@ from stress_backend import (
     StressModelDataError,
     ThresholdSettings,
     build_historical_dataset,
+    fetch_company_overview,
     get_selected_scenario,
     load_workbook_model,
     prepare_latest_for_stress,
@@ -978,6 +979,54 @@ def load_model():
 @st.cache_data(show_spinner=True, ttl=3600)
 def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_company_overview(symbol: str):
+    return fetch_company_overview(symbol.upper().strip())
+
+
+def _overview_score(overview) -> int:
+    score = 0
+    if overview.long_name and overview.long_name != overview.ticker:
+        score += 1
+    if overview.short_name and overview.short_name != overview.ticker:
+        score += 1
+    if overview.current_price is not None:
+        score += 1
+    if overview.market_cap_m is not None:
+        score += 1
+    if overview.summary:
+        score += 1
+    if overview.sector:
+        score += 1
+    if overview.industry:
+        score += 1
+    return score
+
+
+def refresh_company_overview(dataset):
+    try:
+        fresh_overview = load_company_overview(dataset.overview.ticker)
+    except Exception:
+        return dataset
+
+    current_score = _overview_score(dataset.overview)
+    fresh_score = _overview_score(fresh_overview)
+    if fresh_score > current_score:
+        dataset.overview = fresh_overview
+        return dataset
+
+    if (
+        fresh_score == current_score
+        and (
+            fresh_overview.current_price is not None
+            or fresh_overview.market_cap_m is not None
+            or bool(fresh_overview.summary)
+        )
+    ):
+        dataset.overview = fresh_overview
+    return dataset
 
 
 def _first_quartile_series(series: pd.Series, lower: float | None = None, upper: float | None = None) -> float | None:
@@ -2145,6 +2194,7 @@ def main():
     try:
         with st.spinner(f"Loading live Yahoo Finance data for {active_ticker}..."):
             dataset = load_company(active_ticker)
+            dataset = refresh_company_overview(dataset)
     except Exception as exc:
         st.title("What If Stress Test Web App")
         st.error(f"Could not load Yahoo Finance data for `{active_ticker}`.")
