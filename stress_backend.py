@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 import math
@@ -104,6 +105,7 @@ WATCH_MIN_INTEREST_COVERAGE = 5.0
 WATCH_MAX_NET_LEVERAGE = 2.0
 WATCH_MIN_CURRENT_RATIO = 1.0
 CASH_PRESERVATION_MIN = 0.01
+YAHOO_RETRY_DELAYS = (0.4, 1.0, 2.0)
 
 
 @dataclass
@@ -227,6 +229,29 @@ def _ratio(numerator: float | None, denominator: float | None, fallback: float =
     return numerator / denominator
 
 
+def _symbol_payload(response: Any, symbol: str) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        return {}
+    payload = response.get(symbol, {})
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _retry_yahoo_call(fn: Callable[[], Any]) -> Any:
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((0.0, *YAHOO_RETRY_DELAYS), start=1):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Yahoo Finance request failed without an explicit exception.")
+
+
 @lru_cache(maxsize=1)
 def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
     scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
@@ -249,12 +274,11 @@ def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.Dat
 
 
 def fetch_company_overview(symbol: str) -> CompanyOverview:
-    ticker = Ticker(symbol, asynchronous=False)
-
-    quote_type = ticker.quote_type.get(symbol, {}) if isinstance(ticker.quote_type, dict) else {}
-    asset_profile = ticker.asset_profile.get(symbol, {}) if isinstance(ticker.asset_profile, dict) else {}
-    price = ticker.price.get(symbol, {}) if isinstance(ticker.price, dict) else {}
-    financial_data = ticker.financial_data.get(symbol, {}) if isinstance(ticker.financial_data, dict) else {}
+    ticker = _retry_yahoo_call(lambda: Ticker(symbol, asynchronous=False))
+    quote_type = _retry_yahoo_call(lambda: _symbol_payload(ticker.quote_type, symbol))
+    asset_profile = _retry_yahoo_call(lambda: _symbol_payload(ticker.asset_profile, symbol))
+    price = _retry_yahoo_call(lambda: _symbol_payload(ticker.price, symbol))
+    financial_data = _retry_yahoo_call(lambda: _symbol_payload(ticker.financial_data, symbol))
 
     market_cap = _to_float(price.get("marketCap")) or _to_float(financial_data.get("marketCap"))
     current_price = _to_float(price.get("regularMarketPrice")) or _to_float(financial_data.get("currentPrice"))
@@ -275,29 +299,39 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
 
 
 def fetch_annual_financials(symbol: str) -> pd.DataFrame:
-    ticker = Ticker(symbol, asynchronous=False)
-    frame = ticker.all_financial_data()
-    if not isinstance(frame, pd.DataFrame) or frame.empty:
-        raise ValueError(f"No annual financial statement data returned by Yahoo Finance for ticker '{symbol}'.")
+    last_exc: Exception | None = None
+    for delay in (0.0, *YAHOO_RETRY_DELAYS):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            ticker = Ticker(symbol, asynchronous=False)
+            frame = ticker.all_financial_data()
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                raise ValueError(f"No annual financial statement data returned by Yahoo Finance for ticker '{symbol}'.")
 
-    annual = frame.reset_index().copy()
-    if "asOfDate" not in annual.columns:
-        raise ValueError(f"Yahoo Finance did not return annual statement dates for ticker '{symbol}'.")
+            annual = frame.reset_index().copy()
+            if "asOfDate" not in annual.columns:
+                raise ValueError(f"Yahoo Finance did not return annual statement dates for ticker '{symbol}'.")
 
-    annual["asOfDate"] = pd.to_datetime(annual["asOfDate"], errors="coerce")
-    annual = annual.dropna(subset=["asOfDate"])
-    if "periodType" in annual.columns:
-        annual = annual[annual["periodType"].astype(str).str.upper() == "12M"]
-    annual = annual.sort_values("asOfDate")
-    if annual.empty:
-        raise ValueError(f"Yahoo Finance did not return usable 12M annual statements for ticker '{symbol}'.")
+            annual["asOfDate"] = pd.to_datetime(annual["asOfDate"], errors="coerce")
+            annual = annual.dropna(subset=["asOfDate"])
+            if "periodType" in annual.columns:
+                annual = annual[annual["periodType"].astype(str).str.upper() == "12M"]
+            annual = annual.sort_values("asOfDate")
+            if annual.empty:
+                raise ValueError(f"Yahoo Finance did not return usable 12M annual statements for ticker '{symbol}'.")
 
-    annual["Fiscal Year"] = annual["asOfDate"].dt.year.astype(str)
-    latest_periods = annual.tail(min(12, len(annual))).copy()
-    if latest_periods.shape[0] < 2:
-        raise ValueError(f"Yahoo Finance returned fewer than two annual periods for ticker '{symbol}'.")
-    latest_periods = latest_periods.reset_index(drop=True)
-    return latest_periods
+            annual["Fiscal Year"] = annual["asOfDate"].dt.year.astype(str)
+            latest_periods = annual.tail(min(12, len(annual))).copy()
+            if latest_periods.shape[0] < 2:
+                raise ValueError(f"Yahoo Finance returned fewer than two annual periods for ticker '{symbol}'.")
+            return latest_periods.reset_index(drop=True)
+        except Exception as exc:
+            last_exc = exc
+
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError(f"Yahoo Finance annual statement retrieval failed for ticker '{symbol}'.")
 
 
 def _map_single_year(row: pd.Series) -> tuple[dict[str, float | None], dict[str, str], list[str]]:
