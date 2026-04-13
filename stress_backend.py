@@ -252,6 +252,31 @@ def _retry_yahoo_call(fn: Callable[[], Any]) -> Any:
     raise RuntimeError("Yahoo Finance request failed without an explicit exception.")
 
 
+def _overview_completeness_score(overview: CompanyOverview) -> int:
+    score = 0
+    if overview.short_name and overview.short_name != overview.ticker:
+        score += 1
+    if overview.long_name and overview.long_name != overview.ticker:
+        score += 1
+    if overview.sector:
+        score += 1
+    if overview.industry:
+        score += 1
+    if overview.current_price is not None:
+        score += 1
+    if overview.market_cap_m is not None:
+        score += 1
+    if overview.summary:
+        score += 1
+    return score
+
+
+def overview_looks_incomplete(overview: CompanyOverview) -> bool:
+    if overview.current_price is None or overview.market_cap_m is None:
+        return True
+    return _overview_completeness_score(overview) < 4
+
+
 @lru_cache(maxsize=1)
 def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
     scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
@@ -274,27 +299,63 @@ def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.Dat
 
 
 def fetch_company_overview(symbol: str) -> CompanyOverview:
-    ticker = _retry_yahoo_call(lambda: Ticker(symbol, asynchronous=False))
-    quote_type = _retry_yahoo_call(lambda: _symbol_payload(ticker.quote_type, symbol))
-    asset_profile = _retry_yahoo_call(lambda: _symbol_payload(ticker.asset_profile, symbol))
-    price = _retry_yahoo_call(lambda: _symbol_payload(ticker.price, symbol))
-    financial_data = _retry_yahoo_call(lambda: _symbol_payload(ticker.financial_data, symbol))
+    best_overview: CompanyOverview | None = None
+    best_score = -1
+    last_exc: Exception | None = None
 
-    market_cap = _to_float(price.get("marketCap")) or _to_float(financial_data.get("marketCap"))
-    current_price = _to_float(price.get("regularMarketPrice")) or _to_float(financial_data.get("currentPrice"))
+    for delay in (0.0, *YAHOO_RETRY_DELAYS):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            ticker = Ticker(symbol, asynchronous=False)
+            quote_type = _symbol_payload(ticker.quote_type, symbol)
+            asset_profile = _symbol_payload(ticker.asset_profile, symbol)
+            price = _symbol_payload(ticker.price, symbol)
+            financial_data = _symbol_payload(ticker.financial_data, symbol)
 
+            market_cap = _to_float(price.get("marketCap")) or _to_float(financial_data.get("marketCap"))
+            current_price = _to_float(price.get("regularMarketPrice")) or _to_float(financial_data.get("currentPrice"))
+
+            overview = CompanyOverview(
+                ticker=symbol,
+                short_name=str(quote_type.get("shortName") or symbol),
+                long_name=str(quote_type.get("longName") or quote_type.get("shortName") or symbol),
+                sector=str(asset_profile.get("sector") or ""),
+                industry=str(asset_profile.get("industry") or ""),
+                exchange=str(quote_type.get("exchange") or ""),
+                currency=str(price.get("currency") or financial_data.get("financialCurrency") or ""),
+                website=str(asset_profile.get("website") or ""),
+                market_cap_m=_to_millions(market_cap),
+                current_price=current_price,
+                summary=str(asset_profile.get("longBusinessSummary") or ""),
+            )
+
+            score = _overview_completeness_score(overview)
+            if score > best_score:
+                best_overview = overview
+                best_score = score
+
+            if not overview_looks_incomplete(overview):
+                return overview
+        except Exception as exc:
+            last_exc = exc
+
+    if best_overview is not None:
+        return best_overview
+    if last_exc is not None:
+        raise last_exc
     return CompanyOverview(
         ticker=symbol,
-        short_name=str(quote_type.get("shortName") or symbol),
-        long_name=str(quote_type.get("longName") or quote_type.get("shortName") or symbol),
-        sector=str(asset_profile.get("sector") or ""),
-        industry=str(asset_profile.get("industry") or ""),
-        exchange=str(quote_type.get("exchange") or ""),
-        currency=str(price.get("currency") or financial_data.get("financialCurrency") or ""),
-        website=str(asset_profile.get("website") or ""),
-        market_cap_m=_to_millions(market_cap),
-        current_price=current_price,
-        summary=str(asset_profile.get("longBusinessSummary") or ""),
+        short_name=symbol,
+        long_name=symbol,
+        sector="",
+        industry="",
+        exchange="",
+        currency="",
+        website="",
+        market_cap_m=None,
+        current_price=None,
+        summary="",
     )
 
 

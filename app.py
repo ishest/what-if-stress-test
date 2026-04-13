@@ -20,8 +20,10 @@ from stress_backend import (
     StressModelDataError,
     ThresholdSettings,
     build_historical_dataset,
+    fetch_company_overview,
     get_selected_scenario,
     load_workbook_model,
+    overview_looks_incomplete,
     prepare_latest_for_stress,
     run_all_scenarios,
     run_scenario,
@@ -978,6 +980,26 @@ def load_model():
 @st.cache_data(show_spinner=True, ttl=3600)
 def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
+
+
+def refresh_overview_if_needed(dataset):
+    if not overview_looks_incomplete(dataset.overview):
+        return dataset
+    try:
+        refreshed_overview = fetch_company_overview(dataset.overview.ticker)
+    except Exception:
+        return dataset
+    if not overview_looks_incomplete(refreshed_overview):
+        dataset.overview = refreshed_overview
+        return dataset
+    if (
+        refreshed_overview.current_price is not None
+        or refreshed_overview.market_cap_m is not None
+        or refreshed_overview.long_name != refreshed_overview.ticker
+        or refreshed_overview.short_name != refreshed_overview.ticker
+    ):
+        dataset.overview = refreshed_overview
+    return dataset
 
 
 def _first_quartile_series(series: pd.Series, lower: float | None = None, upper: float | None = None) -> float | None:
@@ -2145,6 +2167,7 @@ def main():
     try:
         with st.spinner(f"Loading live Yahoo Finance data for {active_ticker}..."):
             dataset = load_company(active_ticker)
+            dataset = refresh_overview_if_needed(dataset)
     except Exception as exc:
         st.title("What If Stress Test Web App")
         st.error(f"Could not load Yahoo Finance data for `{active_ticker}`.")
