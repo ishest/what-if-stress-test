@@ -105,7 +105,7 @@ WATCH_MIN_INTEREST_COVERAGE = 5.0
 WATCH_MAX_NET_LEVERAGE = 2.0
 WATCH_MIN_CURRENT_RATIO = 1.0
 CASH_PRESERVATION_MIN = 0.01
-YAHOO_RETRY_DELAYS = (0.4, 1.0, 2.0)
+YAHOO_RETRY_DELAYS = (0.0, 0.4, 1.2)
 
 
 @dataclass
@@ -238,43 +238,11 @@ def _symbol_payload(response: Any, symbol: str) -> dict[str, Any]:
     return {}
 
 
-def _retry_yahoo_call(fn: Callable[[], Any]) -> Any:
-    last_exc: Exception | None = None
-    for attempt, delay in enumerate((0.0, *YAHOO_RETRY_DELAYS), start=1):
+def _yahoo_attempts():
+    for delay in YAHOO_RETRY_DELAYS:
         if delay > 0:
             time.sleep(delay)
-        try:
-            return fn()
-        except Exception as exc:
-            last_exc = exc
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("Yahoo Finance request failed without an explicit exception.")
-
-
-def _overview_completeness_score(overview: CompanyOverview) -> int:
-    score = 0
-    if overview.short_name and overview.short_name != overview.ticker:
-        score += 1
-    if overview.long_name and overview.long_name != overview.ticker:
-        score += 1
-    if overview.sector:
-        score += 1
-    if overview.industry:
-        score += 1
-    if overview.current_price is not None:
-        score += 1
-    if overview.market_cap_m is not None:
-        score += 1
-    if overview.summary:
-        score += 1
-    return score
-
-
-def overview_looks_incomplete(overview: CompanyOverview) -> bool:
-    if overview.current_price is None or overview.market_cap_m is None:
-        return True
-    return _overview_completeness_score(overview) < 4
+        yield
 
 
 @lru_cache(maxsize=1)
@@ -299,15 +267,13 @@ def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.Dat
 
 
 def fetch_company_overview(symbol: str) -> CompanyOverview:
-    best_overview: CompanyOverview | None = None
-    best_score = -1
+    last_overview: CompanyOverview | None = None
     last_exc: Exception | None = None
 
-    for delay in (0.0, *YAHOO_RETRY_DELAYS):
-        if delay > 0:
-            time.sleep(delay)
+    for _ in _yahoo_attempts():
         try:
             ticker = Ticker(symbol, asynchronous=False)
+
             quote_type = _symbol_payload(ticker.quote_type, symbol)
             asset_profile = _symbol_payload(ticker.asset_profile, symbol)
             price = _symbol_payload(ticker.price, symbol)
@@ -329,41 +295,23 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
                 current_price=current_price,
                 summary=str(asset_profile.get("longBusinessSummary") or ""),
             )
-
-            score = _overview_completeness_score(overview)
-            if score > best_score:
-                best_overview = overview
-                best_score = score
-
-            if not overview_looks_incomplete(overview):
+            last_overview = overview
+            if overview.current_price is not None or overview.market_cap_m is not None or overview.long_name != symbol:
                 return overview
         except Exception as exc:
             last_exc = exc
 
-    if best_overview is not None:
-        return best_overview
+    if last_overview is not None:
+        return last_overview
     if last_exc is not None:
         raise last_exc
-    return CompanyOverview(
-        ticker=symbol,
-        short_name=symbol,
-        long_name=symbol,
-        sector="",
-        industry="",
-        exchange="",
-        currency="",
-        website="",
-        market_cap_m=None,
-        current_price=None,
-        summary="",
-    )
+    raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")
 
 
 def fetch_annual_financials(symbol: str) -> pd.DataFrame:
-    last_exc: Exception | None = None
-    for delay in (0.0, *YAHOO_RETRY_DELAYS):
-        if delay > 0:
-            time.sleep(delay)
+    last_error: Exception | None = None
+
+    for _ in _yahoo_attempts():
         try:
             ticker = Ticker(symbol, asynchronous=False)
             frame = ticker.all_financial_data()
@@ -386,12 +334,13 @@ def fetch_annual_financials(symbol: str) -> pd.DataFrame:
             latest_periods = annual.tail(min(12, len(annual))).copy()
             if latest_periods.shape[0] < 2:
                 raise ValueError(f"Yahoo Finance returned fewer than two annual periods for ticker '{symbol}'.")
-            return latest_periods.reset_index(drop=True)
+            latest_periods = latest_periods.reset_index(drop=True)
+            return latest_periods
         except Exception as exc:
-            last_exc = exc
+            last_error = exc
 
-    if last_exc is not None:
-        raise last_exc
+    if last_error is not None:
+        raise last_error
     raise ValueError(f"Yahoo Finance annual statement retrieval failed for ticker '{symbol}'.")
 
 

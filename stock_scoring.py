@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import pandas as pd
-from yahooquery import Ticker
 
 from financial_ratios import MILLION, _build_inputs, _safe_div, _to_float
 
@@ -134,27 +132,6 @@ def _sort_year_index(index: pd.Index) -> list[str]:
     return [str(label) for label in sorted(index, key=_key)]
 
 
-@lru_cache(maxsize=64)
-def _load_price_history(symbol: str) -> pd.DataFrame:
-    history = Ticker(symbol).history(period="10y", interval="1d")
-    if not isinstance(history, pd.DataFrame) or history.empty:
-        return pd.DataFrame(columns=["date", "adjclose"])
-    history = history.reset_index()
-    history["date"] = pd.to_datetime(history["date"], errors="coerce")
-    history["adjclose"] = pd.to_numeric(history.get("adjclose"), errors="coerce")
-    history = history.dropna(subset=["date", "adjclose"]).sort_values("date")
-    return history[["date", "adjclose"]].reset_index(drop=True)
-
-
-def _price_on_or_before(history: pd.DataFrame, target_date: pd.Timestamp) -> float | None:
-    if history.empty or pd.isna(target_date):
-        return None
-    matched = history[history["date"] <= target_date]
-    if matched.empty:
-        return None
-    return _to_float(matched.iloc[-1]["adjclose"])
-
-
 def _recommendation(score: float | None) -> str:
     if score is None or _is_missing(score):
         return "N/A"
@@ -262,7 +239,6 @@ def build_stock_scoring_model(dataset) -> StockScoringModel:
     if market_cap_m is None or current_price is None:
         notes.append("Yahoo did not return current market cap or price cleanly, so some valuation metrics may be unavailable.")
 
-    history = _load_price_history(dataset.overview.ticker)
     raw = dataset.annual_raw.copy()
     raw["asOfDate"] = pd.to_datetime(raw["asOfDate"], errors="coerce")
     raw["Year"] = raw["asOfDate"].dt.year.astype("Int64").astype(str)
@@ -275,18 +251,17 @@ def build_stock_scoring_model(dataset) -> StockScoringModel:
             continue
         raw_row = matched.iloc[-1]
         fiscal_date = pd.to_datetime(raw_row["asOfDate"], errors="coerce")
-        year_end_price = _price_on_or_before(history, fiscal_date)
-        shares = _to_float(raw_row.get("BasicAverageShares"))
+        year_market_cap_raw = _to_float(raw_row.get("MarketCap"))
         year_revenue = _to_float(raw_row.get("TotalRevenue"))
         year_net_income = _to_float(raw_row.get("NetIncome"))
-        year_market_cap = year_end_price * shares / MILLION if year_end_price is not None and shares is not None else None
+        year_market_cap = year_market_cap_raw / MILLION if year_market_cap_raw is not None else None
         year_pe = _safe_div(year_market_cap, year_net_income / MILLION) if year_market_cap is not None and year_net_income and year_net_income > 0 else None
         year_ps = _safe_div(year_market_cap, year_revenue / MILLION) if year_market_cap is not None and year_revenue and year_revenue > 0 else None
         valuation_history_rows.append(
             {
                 "Year": year,
                 "Fiscal date": fiscal_date.strftime("%Y-%m-%d") if not pd.isna(fiscal_date) else "n/a",
-                "Year-end price": year_end_price,
+                "Historic market cap ($mm)": year_market_cap,
                 "Historic P/E": year_pe,
                 "Historic P/S": year_ps,
             }
@@ -306,7 +281,7 @@ def build_stock_scoring_model(dataset) -> StockScoringModel:
     ps_vs_history = _safe_div(ps_current, ps_history_avg) if ps_current is not None and ps_history_avg is not None and ps_history_avg > 0 else None
 
     if valuation_history_table.empty:
-        notes.append("Historical year-end valuation context could not be built from Yahoo price history for the last three fiscal years.")
+        notes.append("Historical valuation context could not be built from Yahoo annual market-cap fields for the last three fiscal years.")
 
     metric_rows = [
         _metric_row(
@@ -457,7 +432,7 @@ def build_stock_scoring_model(dataset) -> StockScoringModel:
             _score_relative_multiple(pe_vs_history, (0.85, 1.00, 1.20)),
             "Current P/E / average historic P/E from the last three fiscal years",
             "<=0.85x=100 | <=1.0x=75 | <=1.2x=50 | >1.2x=25",
-            "Lower means the stock is cheaper than its own recent valuation history.",
+            "Lower means the stock is cheaper than its own recent Yahoo annual valuation history.",
         ),
         _metric_row(
             "Valuation",
@@ -467,7 +442,7 @@ def build_stock_scoring_model(dataset) -> StockScoringModel:
             _score_relative_multiple(ps_vs_history, (0.85, 1.00, 1.20)),
             "Current P/S / average historic P/S from the last three fiscal years",
             "<=0.85x=100 | <=1.0x=75 | <=1.2x=50 | >1.2x=25",
-            "Lower means the stock is cheaper than its own recent sales valuation history.",
+            "Lower means the stock is cheaper than its own recent Yahoo annual sales valuation history.",
         ),
     ]
 
@@ -553,12 +528,12 @@ def build_stock_scoring_model(dataset) -> StockScoringModel:
     if current_price is None:
         notes.append("Current Yahoo share price is missing, so market-based valuation scoring is partially unavailable.")
     if pe_history_avg is None or ps_history_avg is None:
-        notes.append("At least one historical valuation comparison metric is unavailable because year-end price or share count data was incomplete.")
+        notes.append("At least one historical valuation comparison metric is unavailable because annual market-cap, revenue, or net income data was incomplete.")
     notes.append("This implementation uses only Yahoo Finance data for the individual ticker. It does not fabricate industry benchmark data.")
 
     if not valuation_history_table.empty:
         valuation_history_table = valuation_history_table.copy()
-        valuation_history_table["Year-end price"] = valuation_history_table["Year-end price"].map(_format_number)
+        valuation_history_table["Historic market cap ($mm)"] = valuation_history_table["Historic market cap ($mm)"].map(_format_number)
         valuation_history_table["Historic P/E"] = valuation_history_table["Historic P/E"].map(_format_number)
         valuation_history_table["Historic P/S"] = valuation_history_table["Historic P/S"].map(_format_number)
 
