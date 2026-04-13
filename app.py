@@ -11,6 +11,7 @@ import streamlit as st
 
 from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
 from multiples import build_multiples_snapshot
+from stock_scoring import build_stock_scoring_model
 from stress_backend import (
     DISTRESS_MAX_NET_LEVERAGE,
     DISTRESS_MIN_CURRENT_RATIO,
@@ -1666,6 +1667,55 @@ def render_multiples_snapshot(dataset):
         st.dataframe(snapshot.category_tables[category], use_container_width=True, hide_index=True)
 
 
+def render_stock_scoring_model(dataset):
+    st.subheader("Scoring Model")
+    st.caption(
+        "This scorecard adapts the stock-analysis spec into a live Yahoo Finance model for one ticker. "
+        "It uses the company's own annual history and current Yahoo market data, without inserting fake industry benchmarks."
+    )
+
+    model = build_stock_scoring_model(dataset)
+
+    summary_cols = st.columns(len(model.summary_cards))
+    for column, card in zip(summary_cols, model.summary_cards):
+        with column:
+            st.metric(card["title"], card["value"])
+
+    st.markdown("**How the model works**")
+    st.markdown(
+        """
+- `Growth` uses the latest three Yahoo annual periods for revenue CAGR and earnings CAGR.
+- `Profitability` scores operating margin, net margin, margin trend, and ROIC.
+- `Financial Health` scores debt-to-equity, current ratio, quick ratio, and interest coverage.
+- `Valuation` scores live market multiples and compares current P/E and P/S against the stock's own recent Yahoo valuation history.
+- Each metric is scored on a `25 / 50 / 75 / 100` scale, category scores are averaged, and the final score uses `30% / 30% / 20% / 20%` weights.
+- The recommendation is a rule-based output from the model, not investment advice.
+        """
+    )
+
+    if model.notes:
+        with st.expander("Data availability and model notes", expanded=False):
+            for note in model.notes:
+                st.write(f"- {note}")
+
+    if not model.valuation_history_table.empty:
+        with st.expander("Historical valuation context from Yahoo prices", expanded=False):
+            st.dataframe(model.valuation_history_table, use_container_width=True, hide_index=True)
+
+    with st.expander("Inputs used in scoring", expanded=False):
+        st.dataframe(model.inputs_table, use_container_width=True, hide_index=True)
+
+    with st.expander("Formulas, thresholds, and weights", expanded=False):
+        st.dataframe(model.formula_table, use_container_width=True, hide_index=True)
+
+    for category in ["Growth", "Profitability", "Financial Health", "Valuation"]:
+        score = model.category_scores.get(category)
+        score_label = "n/a" if score is None or pd.isna(score) else f"{score:.1f}/100"
+        st.markdown(f"**{category}**")
+        st.caption(score_label)
+        st.dataframe(model.category_tables[category], use_container_width=True, hide_index=True)
+
+
 def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds: ThresholdSettings):
     st.subheader("Selected Scenario Dashboard")
     sequence_options = scenario_library["Sequence"].dropna().unique().tolist()
@@ -2125,6 +2175,7 @@ def main():
             "Scenario Explorer",
             "Financial Ratios",
             "Multiples",
+            "Scoring Model",
             "Historicals",
             "Scenario Matrix",
             "Sequence Map",
@@ -2151,15 +2202,17 @@ def main():
     with tabs[4]:
         render_multiples_snapshot(dataset)
     with tabs[5]:
-        render_historical(dataset)
+        render_stock_scoring_model(dataset)
     with tabs[6]:
+        render_historical(dataset)
+    with tabs[7]:
         if scenario_matrix is None:
             render_stress_unavailable(stress_error)
         else:
             render_scenario_matrix(dataset, scenario_matrix)
-    with tabs[7]:
-        render_sequence_library(sequence_map)
     with tabs[8]:
+        render_sequence_library(sequence_map)
+    with tabs[9]:
         render_faq()
 
 
