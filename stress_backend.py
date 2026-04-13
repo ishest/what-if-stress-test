@@ -106,6 +106,7 @@ WATCH_MAX_NET_LEVERAGE = 2.0
 WATCH_MIN_CURRENT_RATIO = 1.0
 CASH_PRESERVATION_MIN = 0.01
 YAHOO_RETRY_DELAYS = (0.0, 0.4, 1.2)
+LAST_GOOD_OVERVIEWS: dict[str, "CompanyOverview"] = {}
 
 
 @dataclass
@@ -245,6 +246,58 @@ def _yahoo_attempts():
         yield
 
 
+def _overview_score(overview: "CompanyOverview") -> int:
+    score = 0
+    if overview.long_name and overview.long_name != overview.ticker:
+        score += 1
+    if overview.short_name and overview.short_name != overview.ticker:
+        score += 1
+    if overview.current_price is not None:
+        score += 1
+    if overview.market_cap_m is not None:
+        score += 1
+    if overview.summary:
+        score += 1
+    if overview.sector:
+        score += 1
+    if overview.industry:
+        score += 1
+    if overview.website:
+        score += 1
+    return score
+
+
+def _choose_text(primary: str, secondary: str, *, ticker: str) -> str:
+    primary_clean = (primary or "").strip()
+    secondary_clean = (secondary or "").strip()
+    if primary_clean and primary_clean != ticker:
+        return primary_clean
+    if secondary_clean:
+        return secondary_clean
+    return primary_clean or secondary_clean
+
+
+def _merge_overviews(primary: "CompanyOverview", fallback: "CompanyOverview" | None) -> "CompanyOverview":
+    if fallback is None:
+        return primary
+    ticker = primary.ticker
+    return CompanyOverview(
+        ticker=ticker,
+        short_name=_choose_text(primary.short_name, fallback.short_name, ticker=ticker) or ticker,
+        long_name=_choose_text(primary.long_name, fallback.long_name, ticker=ticker)
+        or _choose_text(primary.short_name, fallback.short_name, ticker=ticker)
+        or ticker,
+        sector=(primary.sector or fallback.sector or "").strip(),
+        industry=(primary.industry or fallback.industry or "").strip(),
+        exchange=(primary.exchange or fallback.exchange or "").strip(),
+        currency=(primary.currency or fallback.currency or "").strip(),
+        website=(primary.website or fallback.website or "").strip(),
+        market_cap_m=primary.market_cap_m if primary.market_cap_m is not None else fallback.market_cap_m,
+        current_price=primary.current_price if primary.current_price is not None else fallback.current_price,
+        summary=(primary.summary or fallback.summary or "").strip(),
+    )
+
+
 @lru_cache(maxsize=1)
 def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
     scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
@@ -267,7 +320,10 @@ def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.Dat
 
 
 def fetch_company_overview(symbol: str) -> CompanyOverview:
+    symbol = symbol.upper().strip()
+    fallback_overview = LAST_GOOD_OVERVIEWS.get(symbol)
     last_overview: CompanyOverview | None = None
+    best_score = -1
     last_exc: Exception | None = None
 
     for _ in _yahoo_attempts():
@@ -282,7 +338,7 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
             market_cap = _to_float(price.get("marketCap")) or _to_float(financial_data.get("marketCap"))
             current_price = _to_float(price.get("regularMarketPrice")) or _to_float(financial_data.get("currentPrice"))
 
-            overview = CompanyOverview(
+            candidate = CompanyOverview(
                 ticker=symbol,
                 short_name=str(quote_type.get("shortName") or symbol),
                 long_name=str(quote_type.get("longName") or quote_type.get("shortName") or symbol),
@@ -295,14 +351,23 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
                 current_price=current_price,
                 summary=str(asset_profile.get("longBusinessSummary") or ""),
             )
-            last_overview = overview
-            if overview.current_price is not None or overview.market_cap_m is not None or overview.long_name != symbol:
+            overview = _merge_overviews(candidate, fallback_overview)
+            overview_score = _overview_score(overview)
+            if overview_score > best_score:
+                last_overview = overview
+                best_score = overview_score
+            if overview_score >= 4:
+                LAST_GOOD_OVERVIEWS[symbol] = overview
                 return overview
         except Exception as exc:
             last_exc = exc
 
     if last_overview is not None:
+        if _overview_score(last_overview) >= 4:
+            LAST_GOOD_OVERVIEWS[symbol] = last_overview
         return last_overview
+    if fallback_overview is not None:
+        return fallback_overview
     if last_exc is not None:
         raise last_exc
     raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")

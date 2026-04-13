@@ -981,7 +981,7 @@ def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_company_overview(symbol: str):
     return fetch_company_overview(symbol.upper().strip())
 
@@ -1013,6 +1013,15 @@ def refresh_company_overview(dataset):
 
     current_score = _overview_score(dataset.overview)
     fresh_score = _overview_score(fresh_overview)
+    if current_score <= 2 and fresh_score <= 2:
+        try:
+            direct_overview = fetch_company_overview(dataset.overview.ticker)
+        except Exception:
+            direct_overview = None
+        if direct_overview is not None and _overview_score(direct_overview) > fresh_score:
+            fresh_overview = direct_overview
+            fresh_score = _overview_score(fresh_overview)
+
     if fresh_score > current_score:
         dataset.overview = fresh_overview
         return dataset
