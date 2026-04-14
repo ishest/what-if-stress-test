@@ -11,10 +11,6 @@ import math
 import pandas as pd
 from openpyxl import load_workbook
 from yahooquery import Ticker
-try:
-    import yfinance as yf
-except ImportError:  # pragma: no cover - optional fallback in deployment environments
-    yf = None
 
 
 WORKBOOK_PATH = Path(__file__).with_name("WhatIf_StressTest_v4_Fixed.xlsx")
@@ -110,7 +106,6 @@ WATCH_MAX_NET_LEVERAGE = 2.0
 WATCH_MIN_CURRENT_RATIO = 1.0
 CASH_PRESERVATION_MIN = 0.01
 YAHOO_RETRY_DELAYS = (0.0, 0.4, 1.2)
-LAST_GOOD_OVERVIEWS: dict[str, "CompanyOverview"] = {}
 
 
 @dataclass
@@ -250,293 +245,50 @@ def _yahoo_attempts():
         yield
 
 
-def _overview_score(overview: "CompanyOverview") -> int:
-    score = 0
-    if overview.long_name and overview.long_name != overview.ticker:
-        score += 1
-    if overview.short_name and overview.short_name != overview.ticker:
-        score += 1
-    if overview.current_price is not None:
-        score += 1
-    if overview.market_cap_m is not None:
-        score += 1
-    if overview.summary:
-        score += 1
-    if overview.sector:
-        score += 1
-    if overview.industry:
-        score += 1
-    if overview.website:
-        score += 1
-    return score
+def fetch_company_overview(symbol: str) -> CompanyOverview:
+    symbol = symbol.upper().strip()
+    ticker = Ticker(symbol, asynchronous=False)
 
-
-def _choose_text(primary: str, secondary: str, *, ticker: str) -> str:
-    primary_clean = (primary or "").strip()
-    secondary_clean = (secondary or "").strip()
-    if primary_clean and primary_clean != ticker:
-        return primary_clean
-    if secondary_clean:
-        return secondary_clean
-    return primary_clean or secondary_clean
-
-
-def _merge_overviews(primary: "CompanyOverview", fallback: "CompanyOverview" | None) -> "CompanyOverview":
-    if fallback is None:
-        return primary
-    ticker = primary.ticker
-    return CompanyOverview(
-        ticker=ticker,
-        short_name=_choose_text(primary.short_name, fallback.short_name, ticker=ticker) or ticker,
-        long_name=_choose_text(primary.long_name, fallback.long_name, ticker=ticker)
-        or _choose_text(primary.short_name, fallback.short_name, ticker=ticker)
-        or ticker,
-        sector=(primary.sector or fallback.sector or "").strip(),
-        industry=(primary.industry or fallback.industry or "").strip(),
-        exchange=(primary.exchange or fallback.exchange or "").strip(),
-        currency=(primary.currency or fallback.currency or "").strip(),
-        website=(primary.website or fallback.website or "").strip(),
-        market_cap_m=primary.market_cap_m if primary.market_cap_m is not None else fallback.market_cap_m,
-        current_price=primary.current_price if primary.current_price is not None else fallback.current_price,
-        summary=(primary.summary or fallback.summary or "").strip(),
-    )
-
-
-def _first_non_empty_str(*values: Any) -> str:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return ""
-
-
-def _nested_payload(payload: dict[str, Any], key: str) -> dict[str, Any]:
-    value = payload.get(key, {})
-    return value if isinstance(value, dict) else {}
-
-
-def _build_overview(
-    *,
-    ticker: str,
-    short_name: str = "",
-    long_name: str = "",
-    sector: str = "",
-    industry: str = "",
-    exchange: str = "",
-    currency: str = "",
-    website: str = "",
-    market_cap_m: float | None = None,
-    current_price: float | None = None,
-    summary: str = "",
-) -> "CompanyOverview":
-    clean_short = _choose_text(short_name, ticker, ticker=ticker) or ticker
-    clean_long = _choose_text(long_name, clean_short, ticker=ticker) or clean_short or ticker
-    return CompanyOverview(
-        ticker=ticker,
-        short_name=clean_short,
-        long_name=clean_long,
-        sector=(sector or "").strip(),
-        industry=(industry or "").strip(),
-        exchange=(exchange or "").strip(),
-        currency=(currency or "").strip(),
-        website=(website or "").strip(),
-        market_cap_m=market_cap_m,
-        current_price=current_price,
-        summary=(summary or "").strip(),
-    )
-
-
-def _fetch_company_overview_yfinance(symbol: str) -> "CompanyOverview" | None:
-    if yf is None:
-        return None
     try:
-        ticker = yf.Ticker(symbol)
-        fast_info = dict(getattr(ticker, "fast_info", {}) or {})
-        info = ticker.info if isinstance(ticker.info, dict) else {}
+        quote_type_response = ticker.quote_type
     except Exception:
-        return None
+        quote_type_response = {}
+    try:
+        asset_profile_response = ticker.asset_profile
+    except Exception:
+        asset_profile_response = {}
+    try:
+        price_response = ticker.price
+    except Exception:
+        price_response = {}
+    try:
+        financial_data_response = ticker.financial_data
+    except Exception:
+        financial_data_response = {}
 
-    market_cap_raw = _to_float(fast_info.get("marketCap")) or _to_float(info.get("marketCap"))
-    current_price = (
-        _to_float(fast_info.get("lastPrice"))
-        or _to_float(fast_info.get("regularMarketPreviousClose"))
-        or _to_float(info.get("currentPrice"))
-        or _to_float(info.get("regularMarketPrice"))
-    )
-    return _build_overview(
+    quote_type = _symbol_payload(quote_type_response, symbol)
+    asset_profile = _symbol_payload(asset_profile_response, symbol)
+    price = _symbol_payload(price_response, symbol)
+    financial_data = _symbol_payload(financial_data_response, symbol)
+
+    market_cap = _to_float(price.get("marketCap")) or _to_float(financial_data.get("marketCap"))
+    current_price = _to_float(price.get("regularMarketPrice")) or _to_float(financial_data.get("currentPrice"))
+    short_name = str(quote_type.get("shortName") or price.get("shortName") or symbol)
+    long_name = str(quote_type.get("longName") or price.get("longName") or short_name or symbol)
+
+    return CompanyOverview(
         ticker=symbol,
-        short_name=_first_non_empty_str(info.get("shortName"), info.get("displayName"), symbol),
-        long_name=_first_non_empty_str(info.get("longName"), info.get("shortName"), info.get("displayName"), symbol),
-        sector=_first_non_empty_str(info.get("sector"), info.get("sectorDisp")),
-        industry=_first_non_empty_str(info.get("industry"), info.get("industryDisp")),
-        exchange=_first_non_empty_str(fast_info.get("exchange"), info.get("exchange"), info.get("fullExchangeName")),
-        currency=_first_non_empty_str(fast_info.get("currency"), info.get("currency"), info.get("financialCurrency")),
-        website=_first_non_empty_str(info.get("website")),
-        market_cap_m=_to_millions(market_cap_raw),
+        short_name=short_name,
+        long_name=long_name,
+        sector=str(asset_profile.get("sector") or ""),
+        industry=str(asset_profile.get("industry") or ""),
+        exchange=str(quote_type.get("exchange") or price.get("exchange") or ""),
+        currency=str(price.get("currency") or financial_data.get("financialCurrency") or ""),
+        website=str(asset_profile.get("website") or ""),
+        market_cap_m=_to_millions(market_cap),
         current_price=current_price,
-        summary=_first_non_empty_str(info.get("longBusinessSummary"), info.get("companyOfficers")),
+        summary=str(asset_profile.get("longBusinessSummary") or ""),
     )
-
-
-def _fetch_company_overview_yahooquery(symbol: str) -> "CompanyOverview" | None:
-    last_overview: CompanyOverview | None = None
-    best_score = -1
-    last_exc: Exception | None = None
-
-    for _ in _yahoo_attempts():
-        try:
-            ticker = Ticker(symbol, asynchronous=False)
-            quotes: dict[str, Any] = {}
-            payload: dict[str, Any] = {}
-            separate_price: dict[str, Any] = {}
-            separate_quote_type: dict[str, Any] = {}
-            separate_asset_profile: dict[str, Any] = {}
-            separate_summary_profile: dict[str, Any] = {}
-            separate_financial_data: dict[str, Any] = {}
-            separate_summary_detail: dict[str, Any] = {}
-
-            try:
-                quotes = _symbol_payload(ticker.quotes, symbol)
-            except Exception:
-                quotes = {}
-
-            try:
-                modules = ticker.get_modules(
-                    [
-                        "price",
-                        "quoteType",
-                        "assetProfile",
-                        "financialData",
-                        "summaryDetail",
-                        "summaryProfile",
-                    ]
-                )
-                payload = _symbol_payload(modules, symbol)
-            except Exception:
-                payload = {}
-
-            try:
-                separate_price = _symbol_payload(ticker.price, symbol)
-            except Exception:
-                separate_price = {}
-            try:
-                separate_quote_type = _symbol_payload(ticker.quote_type, symbol)
-            except Exception:
-                separate_quote_type = {}
-            try:
-                separate_asset_profile = _symbol_payload(ticker.asset_profile, symbol)
-            except Exception:
-                separate_asset_profile = {}
-            try:
-                separate_summary_profile = _symbol_payload(ticker.summary_profile, symbol)
-            except Exception:
-                separate_summary_profile = {}
-            try:
-                separate_financial_data = _symbol_payload(ticker.financial_data, symbol)
-            except Exception:
-                separate_financial_data = {}
-            try:
-                separate_summary_detail = _symbol_payload(ticker.summary_detail, symbol)
-            except Exception:
-                separate_summary_detail = {}
-
-            quote_type = _nested_payload(payload, "quoteType")
-            asset_profile = _nested_payload(payload, "assetProfile")
-            summary_profile = _nested_payload(payload, "summaryProfile")
-            price = _nested_payload(payload, "price")
-            financial_data = _nested_payload(payload, "financialData")
-            summary_detail = _nested_payload(payload, "summaryDetail")
-
-            if separate_price or quotes:
-                merged_price = {}
-                merged_price.update(quotes)
-                merged_price.update(separate_price)
-                merged_price.update(price)
-                price = merged_price
-            if separate_quote_type or quotes:
-                merged_quote_type = {}
-                merged_quote_type.update(quotes)
-                merged_quote_type.update(separate_quote_type)
-                merged_quote_type.update(quote_type)
-                quote_type = merged_quote_type
-            if separate_asset_profile:
-                merged_asset_profile = {}
-                merged_asset_profile.update(separate_asset_profile)
-                merged_asset_profile.update(asset_profile)
-                asset_profile = merged_asset_profile
-            if separate_summary_profile:
-                merged_summary_profile = {}
-                merged_summary_profile.update(separate_summary_profile)
-                merged_summary_profile.update(summary_profile)
-                summary_profile = merged_summary_profile
-            if separate_financial_data:
-                merged_financial_data = {}
-                merged_financial_data.update(separate_financial_data)
-                merged_financial_data.update(financial_data)
-                financial_data = merged_financial_data
-            if separate_summary_detail:
-                merged_summary_detail = {}
-                merged_summary_detail.update(separate_summary_detail)
-                merged_summary_detail.update(summary_detail)
-                summary_detail = merged_summary_detail
-
-            market_cap = (
-                _to_float(price.get("marketCap"))
-                or _to_float(quote_type.get("marketCap"))
-                or _to_float(summary_detail.get("marketCap"))
-                or _to_float(summary_detail.get("nonDilutedMarketCap"))
-                or _to_float(financial_data.get("marketCap"))
-            )
-            current_price = (
-                _to_float(price.get("regularMarketPrice"))
-                or _to_float(quote_type.get("regularMarketPrice"))
-                or _to_float(financial_data.get("currentPrice"))
-                or _to_float(summary_detail.get("previousClose"))
-                or _to_float(summary_detail.get("regularMarketPreviousClose"))
-            )
-
-            overview = _build_overview(
-                ticker=symbol,
-                short_name=_first_non_empty_str(
-                    quote_type.get("shortName"),
-                    price.get("shortName"),
-                    quote_type.get("displayName"),
-                    symbol,
-                ),
-                long_name=_first_non_empty_str(
-                    quote_type.get("longName"),
-                    price.get("longName"),
-                    quote_type.get("displayName"),
-                    symbol,
-                ),
-                sector=_first_non_empty_str(asset_profile.get("sector"), summary_profile.get("sector")),
-                industry=_first_non_empty_str(asset_profile.get("industry"), summary_profile.get("industry")),
-                exchange=_first_non_empty_str(quote_type.get("exchange"), price.get("exchange")),
-                currency=_first_non_empty_str(
-                    price.get("currency"),
-                    summary_detail.get("currency"),
-                    financial_data.get("financialCurrency"),
-                ),
-                website=_first_non_empty_str(asset_profile.get("website"), summary_profile.get("website")),
-                market_cap_m=_to_millions(market_cap),
-                current_price=current_price,
-                summary=_first_non_empty_str(
-                    asset_profile.get("longBusinessSummary"),
-                    summary_profile.get("longBusinessSummary"),
-                ),
-            )
-            overview_score = _overview_score(overview)
-            if overview_score > best_score:
-                last_overview = overview
-                best_score = overview_score
-        except Exception as exc:
-            last_exc = exc
-
-    if last_overview is not None:
-        return last_overview
-    if last_exc is not None:
-        return None
-    return None
 
 
 @lru_cache(maxsize=1)
@@ -558,43 +310,6 @@ def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.Dat
         minimum_current_ratio=float(setup_sheet["B14"].value or 1.0),
     )
     return scenario_library, sequence_map, defaults
-
-
-def fetch_company_overview(symbol: str) -> CompanyOverview:
-    symbol = symbol.upper().strip()
-    fallback_overview = LAST_GOOD_OVERVIEWS.get(symbol)
-    candidates: list[CompanyOverview] = []
-
-    yfinance_overview = _fetch_company_overview_yfinance(symbol)
-    if yfinance_overview is not None:
-        candidates.append(yfinance_overview)
-
-    yahooquery_overview = _fetch_company_overview_yahooquery(symbol)
-    if yahooquery_overview is not None:
-        candidates.append(yahooquery_overview)
-
-    if fallback_overview is not None:
-        candidates.append(fallback_overview)
-
-    if not candidates:
-        raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")
-
-    best_overview = None
-    best_score = -1
-    for candidate in candidates:
-        merged = _merge_overviews(candidate, fallback_overview)
-        score = _overview_score(merged)
-        if score > best_score:
-            best_overview = merged
-            best_score = score
-
-    if best_overview is None:
-        raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")
-
-    if best_score >= 4:
-        LAST_GOOD_OVERVIEWS[symbol] = best_overview
-    return best_overview
-
 
 def fetch_annual_financials(symbol: str) -> pd.DataFrame:
     last_error: Exception | None = None

@@ -20,7 +20,6 @@ from stress_backend import (
     StressModelDataError,
     ThresholdSettings,
     build_historical_dataset,
-    fetch_company_overview,
     get_selected_scenario,
     load_workbook_model,
     prepare_latest_for_stress,
@@ -976,82 +975,8 @@ def load_model():
     return load_workbook_model()
 
 
-@st.cache_data(show_spinner=True, ttl=3600)
 def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
-
-
-def load_company_overview(symbol: str):
-    return fetch_company_overview(symbol.upper().strip())
-
-
-def _overview_score(overview) -> int:
-    score = 0
-    if overview.long_name and overview.long_name != overview.ticker:
-        score += 1
-    if overview.short_name and overview.short_name != overview.ticker:
-        score += 1
-    if overview.current_price is not None:
-        score += 1
-    if overview.market_cap_m is not None:
-        score += 1
-    if overview.summary:
-        score += 1
-    if overview.sector:
-        score += 1
-    if overview.industry:
-        score += 1
-    return score
-
-
-def _overview_session_key(ticker: str) -> str:
-    return f"_last_good_overview::{ticker.upper().strip()}"
-
-
-def refresh_company_overview(dataset):
-    ticker = dataset.overview.ticker.upper().strip()
-    cached_overview = st.session_state.get(_overview_session_key(ticker))
-    if cached_overview is not None and _overview_score(cached_overview) > _overview_score(dataset.overview):
-        dataset.overview = cached_overview
-
-    try:
-        fresh_overview = load_company_overview(ticker)
-    except Exception:
-        cached_overview = st.session_state.get(_overview_session_key(ticker))
-        if cached_overview is not None and _overview_score(cached_overview) > _overview_score(dataset.overview):
-            dataset.overview = cached_overview
-        return dataset
-
-    current_score = _overview_score(dataset.overview)
-    fresh_score = _overview_score(fresh_overview)
-    if current_score <= 2 and fresh_score <= 2:
-        try:
-            direct_overview = fetch_company_overview(ticker)
-        except Exception:
-            direct_overview = None
-        if direct_overview is not None and _overview_score(direct_overview) > fresh_score:
-            fresh_overview = direct_overview
-            fresh_score = _overview_score(fresh_overview)
-
-    if fresh_score > current_score:
-        dataset.overview = fresh_overview
-    elif (
-        fresh_score == current_score
-        and (
-            fresh_overview.current_price is not None
-            or fresh_overview.market_cap_m is not None
-            or bool(fresh_overview.summary)
-        )
-    ):
-        dataset.overview = fresh_overview
-
-    if _overview_score(dataset.overview) >= 4:
-        st.session_state[_overview_session_key(ticker)] = dataset.overview
-    else:
-        cached_overview = st.session_state.get(_overview_session_key(ticker))
-        if cached_overview is not None and _overview_score(cached_overview) > _overview_score(dataset.overview):
-            dataset.overview = cached_overview
-    return dataset
 
 
 def _first_quartile_series(series: pd.Series, lower: float | None = None, upper: float | None = None) -> float | None:
@@ -2219,7 +2144,6 @@ def main():
     try:
         with st.spinner(f"Loading live Yahoo Finance data for {active_ticker}..."):
             dataset = load_company(active_ticker)
-            dataset = refresh_company_overview(dataset)
     except Exception as exc:
         st.title("What If Stress Test Web App")
         st.error(f"Could not load Yahoo Finance data for `{active_ticker}`.")
