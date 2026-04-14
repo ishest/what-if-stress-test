@@ -298,6 +298,14 @@ def _merge_overviews(primary: "CompanyOverview", fallback: "CompanyOverview" | N
     )
 
 
+def _first_non_empty_str(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 @lru_cache(maxsize=1)
 def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
     scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
@@ -329,27 +337,67 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
     for _ in _yahoo_attempts():
         try:
             ticker = Ticker(symbol, asynchronous=False)
+            modules = ticker.get_modules(
+                [
+                    "price",
+                    "quoteType",
+                    "assetProfile",
+                    "financialData",
+                    "summaryDetail",
+                    "summaryProfile",
+                ]
+            )
+            payload = _symbol_payload(modules, symbol)
+            quote_type = payload.get("quoteType", {}) if isinstance(payload.get("quoteType"), dict) else {}
+            asset_profile = payload.get("assetProfile", {}) if isinstance(payload.get("assetProfile"), dict) else {}
+            summary_profile = payload.get("summaryProfile", {}) if isinstance(payload.get("summaryProfile"), dict) else {}
+            price = payload.get("price", {}) if isinstance(payload.get("price"), dict) else {}
+            financial_data = payload.get("financialData", {}) if isinstance(payload.get("financialData"), dict) else {}
+            summary_detail = payload.get("summaryDetail", {}) if isinstance(payload.get("summaryDetail"), dict) else {}
 
-            quote_type = _symbol_payload(ticker.quote_type, symbol)
-            asset_profile = _symbol_payload(ticker.asset_profile, symbol)
-            price = _symbol_payload(ticker.price, symbol)
-            financial_data = _symbol_payload(ticker.financial_data, symbol)
-
-            market_cap = _to_float(price.get("marketCap")) or _to_float(financial_data.get("marketCap"))
-            current_price = _to_float(price.get("regularMarketPrice")) or _to_float(financial_data.get("currentPrice"))
+            market_cap = (
+                _to_float(price.get("marketCap"))
+                or _to_float(summary_detail.get("marketCap"))
+                or _to_float(summary_detail.get("nonDilutedMarketCap"))
+                or _to_float(financial_data.get("marketCap"))
+            )
+            current_price = (
+                _to_float(price.get("regularMarketPrice"))
+                or _to_float(financial_data.get("currentPrice"))
+                or _to_float(summary_detail.get("previousClose"))
+                or _to_float(summary_detail.get("regularMarketPreviousClose"))
+            )
+            short_name = _first_non_empty_str(
+                quote_type.get("shortName"),
+                price.get("shortName"),
+                symbol,
+            )
+            long_name = _first_non_empty_str(
+                quote_type.get("longName"),
+                price.get("longName"),
+                short_name,
+                symbol,
+            )
 
             candidate = CompanyOverview(
                 ticker=symbol,
-                short_name=str(quote_type.get("shortName") or symbol),
-                long_name=str(quote_type.get("longName") or quote_type.get("shortName") or symbol),
-                sector=str(asset_profile.get("sector") or ""),
-                industry=str(asset_profile.get("industry") or ""),
-                exchange=str(quote_type.get("exchange") or ""),
-                currency=str(price.get("currency") or financial_data.get("financialCurrency") or ""),
-                website=str(asset_profile.get("website") or ""),
+                short_name=short_name,
+                long_name=long_name,
+                sector=_first_non_empty_str(asset_profile.get("sector"), summary_profile.get("sector")),
+                industry=_first_non_empty_str(asset_profile.get("industry"), summary_profile.get("industry")),
+                exchange=_first_non_empty_str(quote_type.get("exchange"), price.get("exchange")),
+                currency=_first_non_empty_str(
+                    price.get("currency"),
+                    summary_detail.get("currency"),
+                    financial_data.get("financialCurrency"),
+                ),
+                website=_first_non_empty_str(asset_profile.get("website"), summary_profile.get("website")),
                 market_cap_m=_to_millions(market_cap),
                 current_price=current_price,
-                summary=str(asset_profile.get("longBusinessSummary") or ""),
+                summary=_first_non_empty_str(
+                    asset_profile.get("longBusinessSummary"),
+                    summary_profile.get("longBusinessSummary"),
+                ),
             )
             overview = _merge_overviews(candidate, fallback_overview)
             overview_score = _overview_score(overview)

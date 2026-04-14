@@ -981,7 +981,6 @@ def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
 
 
-@st.cache_data(show_spinner=False, ttl=60)
 def load_company_overview(symbol: str):
     return fetch_company_overview(symbol.upper().strip())
 
