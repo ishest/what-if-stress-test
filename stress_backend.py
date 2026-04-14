@@ -11,6 +11,10 @@ import math
 import pandas as pd
 from openpyxl import load_workbook
 from yahooquery import Ticker
+try:
+    import yfinance as yf
+except ImportError:  # pragma: no cover - optional fallback in deployment environments
+    yf = None
 
 
 WORKBOOK_PATH = Path(__file__).with_name("WhatIf_StressTest_v4_Fixed.xlsx")
@@ -311,30 +315,70 @@ def _nested_payload(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-@lru_cache(maxsize=1)
-def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
-    scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
-    scenario_library = scenario_library.dropna(subset=["Sequence", "Severity"]).copy()
-    scenario_library["Scenario Key"] = scenario_library["Scenario Key"].astype(str)
-
-    sequence_map = pd.read_excel(workbook_path, sheet_name="WhatIf_Sequences", header=2, engine="openpyxl")
-    sequence_map = sequence_map.dropna(subset=["Sequence"]).copy()
-
-    workbook = load_workbook(workbook_path, data_only=False)
-    setup_sheet = workbook["Scenario_Setup"]
-    defaults = ThresholdSettings(
-        sga_variable_cost_share=float(setup_sheet["B9"].value or 0.4),
-        minimum_cash_buffer=float(setup_sheet["B11"].value or 0.0),
-        minimum_interest_coverage=float(setup_sheet["B12"].value or 1.5),
-        maximum_net_leverage=float(setup_sheet["B13"].value or 4.0),
-        minimum_current_ratio=float(setup_sheet["B14"].value or 1.0),
+def _build_overview(
+    *,
+    ticker: str,
+    short_name: str = "",
+    long_name: str = "",
+    sector: str = "",
+    industry: str = "",
+    exchange: str = "",
+    currency: str = "",
+    website: str = "",
+    market_cap_m: float | None = None,
+    current_price: float | None = None,
+    summary: str = "",
+) -> "CompanyOverview":
+    clean_short = _choose_text(short_name, ticker, ticker=ticker) or ticker
+    clean_long = _choose_text(long_name, clean_short, ticker=ticker) or clean_short or ticker
+    return CompanyOverview(
+        ticker=ticker,
+        short_name=clean_short,
+        long_name=clean_long,
+        sector=(sector or "").strip(),
+        industry=(industry or "").strip(),
+        exchange=(exchange or "").strip(),
+        currency=(currency or "").strip(),
+        website=(website or "").strip(),
+        market_cap_m=market_cap_m,
+        current_price=current_price,
+        summary=(summary or "").strip(),
     )
-    return scenario_library, sequence_map, defaults
 
 
-def fetch_company_overview(symbol: str) -> CompanyOverview:
-    symbol = symbol.upper().strip()
-    fallback_overview = LAST_GOOD_OVERVIEWS.get(symbol)
+def _fetch_company_overview_yfinance(symbol: str) -> "CompanyOverview" | None:
+    if yf is None:
+        return None
+    try:
+        ticker = yf.Ticker(symbol)
+        fast_info = dict(getattr(ticker, "fast_info", {}) or {})
+        info = ticker.info if isinstance(ticker.info, dict) else {}
+    except Exception:
+        return None
+
+    market_cap_raw = _to_float(fast_info.get("marketCap")) or _to_float(info.get("marketCap"))
+    current_price = (
+        _to_float(fast_info.get("lastPrice"))
+        or _to_float(fast_info.get("regularMarketPreviousClose"))
+        or _to_float(info.get("currentPrice"))
+        or _to_float(info.get("regularMarketPrice"))
+    )
+    return _build_overview(
+        ticker=symbol,
+        short_name=_first_non_empty_str(info.get("shortName"), info.get("displayName"), symbol),
+        long_name=_first_non_empty_str(info.get("longName"), info.get("shortName"), info.get("displayName"), symbol),
+        sector=_first_non_empty_str(info.get("sector"), info.get("sectorDisp")),
+        industry=_first_non_empty_str(info.get("industry"), info.get("industryDisp")),
+        exchange=_first_non_empty_str(fast_info.get("exchange"), info.get("exchange"), info.get("fullExchangeName")),
+        currency=_first_non_empty_str(fast_info.get("currency"), info.get("currency"), info.get("financialCurrency")),
+        website=_first_non_empty_str(info.get("website")),
+        market_cap_m=_to_millions(market_cap_raw),
+        current_price=current_price,
+        summary=_first_non_empty_str(info.get("longBusinessSummary"), info.get("companyOfficers")),
+    )
+
+
+def _fetch_company_overview_yahooquery(symbol: str) -> "CompanyOverview" | None:
     last_overview: CompanyOverview | None = None
     best_score = -1
     last_exc: Exception | None = None
@@ -450,24 +494,21 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
                 or _to_float(summary_detail.get("previousClose"))
                 or _to_float(summary_detail.get("regularMarketPreviousClose"))
             )
-            short_name = _first_non_empty_str(
-                quote_type.get("shortName"),
-                price.get("shortName"),
-                quote_type.get("displayName"),
-                symbol,
-            )
-            long_name = _first_non_empty_str(
-                quote_type.get("longName"),
-                price.get("longName"),
-                quote_type.get("displayName"),
-                short_name,
-                symbol,
-            )
 
-            candidate = CompanyOverview(
+            overview = _build_overview(
                 ticker=symbol,
-                short_name=short_name,
-                long_name=long_name,
+                short_name=_first_non_empty_str(
+                    quote_type.get("shortName"),
+                    price.get("shortName"),
+                    quote_type.get("displayName"),
+                    symbol,
+                ),
+                long_name=_first_non_empty_str(
+                    quote_type.get("longName"),
+                    price.get("longName"),
+                    quote_type.get("displayName"),
+                    symbol,
+                ),
                 sector=_first_non_empty_str(asset_profile.get("sector"), summary_profile.get("sector")),
                 industry=_first_non_empty_str(asset_profile.get("industry"), summary_profile.get("industry")),
                 exchange=_first_non_empty_str(quote_type.get("exchange"), price.get("exchange")),
@@ -484,26 +525,75 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
                     summary_profile.get("longBusinessSummary"),
                 ),
             )
-            overview = _merge_overviews(candidate, fallback_overview)
             overview_score = _overview_score(overview)
             if overview_score > best_score:
                 last_overview = overview
                 best_score = overview_score
-            if overview_score >= 4:
-                LAST_GOOD_OVERVIEWS[symbol] = overview
-                return overview
         except Exception as exc:
             last_exc = exc
 
     if last_overview is not None:
-        if _overview_score(last_overview) >= 4:
-            LAST_GOOD_OVERVIEWS[symbol] = last_overview
         return last_overview
-    if fallback_overview is not None:
-        return fallback_overview
     if last_exc is not None:
-        raise last_exc
-    raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")
+        return None
+    return None
+
+
+@lru_cache(maxsize=1)
+def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
+    scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
+    scenario_library = scenario_library.dropna(subset=["Sequence", "Severity"]).copy()
+    scenario_library["Scenario Key"] = scenario_library["Scenario Key"].astype(str)
+
+    sequence_map = pd.read_excel(workbook_path, sheet_name="WhatIf_Sequences", header=2, engine="openpyxl")
+    sequence_map = sequence_map.dropna(subset=["Sequence"]).copy()
+
+    workbook = load_workbook(workbook_path, data_only=False)
+    setup_sheet = workbook["Scenario_Setup"]
+    defaults = ThresholdSettings(
+        sga_variable_cost_share=float(setup_sheet["B9"].value or 0.4),
+        minimum_cash_buffer=float(setup_sheet["B11"].value or 0.0),
+        minimum_interest_coverage=float(setup_sheet["B12"].value or 1.5),
+        maximum_net_leverage=float(setup_sheet["B13"].value or 4.0),
+        minimum_current_ratio=float(setup_sheet["B14"].value or 1.0),
+    )
+    return scenario_library, sequence_map, defaults
+
+
+def fetch_company_overview(symbol: str) -> CompanyOverview:
+    symbol = symbol.upper().strip()
+    fallback_overview = LAST_GOOD_OVERVIEWS.get(symbol)
+    candidates: list[CompanyOverview] = []
+
+    yfinance_overview = _fetch_company_overview_yfinance(symbol)
+    if yfinance_overview is not None:
+        candidates.append(yfinance_overview)
+
+    yahooquery_overview = _fetch_company_overview_yahooquery(symbol)
+    if yahooquery_overview is not None:
+        candidates.append(yahooquery_overview)
+
+    if fallback_overview is not None:
+        candidates.append(fallback_overview)
+
+    if not candidates:
+        raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")
+
+    best_overview = None
+    best_score = -1
+    for candidate in candidates:
+        merged = _merge_overviews(candidate, fallback_overview)
+        score = _overview_score(merged)
+        if score > best_score:
+            best_overview = merged
+            best_score = score
+
+    if best_overview is None:
+        raise ValueError(f"Yahoo Finance overview retrieval failed for ticker '{symbol}'.")
+
+    if best_score >= 4:
+        LAST_GOOD_OVERVIEWS[symbol] = best_overview
+    return best_overview
 
 
 def fetch_annual_financials(symbol: str) -> pd.DataFrame:
