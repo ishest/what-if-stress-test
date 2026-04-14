@@ -10,6 +10,7 @@ import math
 
 import pandas as pd
 import requests
+import yfinance as yf
 from openpyxl import load_workbook
 from yahooquery import Ticker
 
@@ -504,6 +505,35 @@ def _fetch_company_overview_via_yahooquery(symbol: str) -> CompanyOverview:
     )
 
 
+def _fetch_company_overview_via_yfinance(symbol: str) -> CompanyOverview:
+    ticker = yf.Ticker(symbol)
+    info = ticker.info if isinstance(ticker.info, dict) else {}
+
+    fast_info = getattr(ticker, "fast_info", None)
+    fast_price = None
+    if hasattr(fast_info, "get"):
+        fast_price = _to_float(fast_info.get("lastPrice"))
+
+    market_cap = _to_float(info.get("marketCap"))
+    current_price = _to_float(info.get("regularMarketPrice")) or _to_float(info.get("currentPrice")) or fast_price
+    short_name = str(info.get("shortName") or symbol)
+    long_name = str(info.get("longName") or short_name or symbol)
+
+    return CompanyOverview(
+        ticker=symbol,
+        short_name=short_name,
+        long_name=long_name,
+        sector=str(info.get("sector") or ""),
+        industry=str(info.get("industry") or ""),
+        exchange=str(info.get("exchange") or ""),
+        currency=str(info.get("currency") or info.get("financialCurrency") or ""),
+        website=str(info.get("website") or ""),
+        market_cap_m=_to_millions(market_cap),
+        current_price=current_price,
+        summary=str(info.get("longBusinessSummary") or ""),
+    )
+
+
 def _merge_company_overview(primary: CompanyOverview, secondary: CompanyOverview) -> CompanyOverview:
     symbol = primary.ticker or secondary.ticker
 
@@ -560,8 +590,14 @@ def _remember_best_overview(symbol: str, overview: CompanyOverview) -> CompanyOv
 
 def fetch_company_overview(symbol: str) -> CompanyOverview:
     symbol = symbol.upper().strip()
+    yfinance_overview: CompanyOverview | None = None
     direct_overview: CompanyOverview | None = None
     yahooquery_overview: CompanyOverview | None = None
+
+    try:
+        yfinance_overview = _fetch_company_overview_via_yfinance(symbol)
+    except Exception:
+        yfinance_overview = None
 
     try:
         direct_overview = _fetch_company_overview_via_http(symbol)
@@ -573,13 +609,20 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
     except Exception:
         yahooquery_overview = None
 
-    if direct_overview and yahooquery_overview:
-        combined = _merge_company_overview(direct_overview, yahooquery_overview)
-        return _remember_best_overview(symbol, combined)
+    combined: CompanyOverview | None = None
+    if yfinance_overview:
+        combined = yfinance_overview
     if direct_overview:
-        return _remember_best_overview(symbol, direct_overview)
+        combined = _merge_company_overview(direct_overview, combined) if combined else direct_overview
     if yahooquery_overview:
-        return _remember_best_overview(symbol, yahooquery_overview)
+        combined = _merge_company_overview(yahooquery_overview, combined) if combined else yahooquery_overview
+
+    if combined:
+        if yfinance_overview:
+            combined = _merge_company_overview(yfinance_overview, combined)
+        elif direct_overview:
+            combined = _merge_company_overview(direct_overview, combined)
+        return _remember_best_overview(symbol, combined)
     if symbol in _LAST_GOOD_OVERVIEWS:
         return _LAST_GOOD_OVERVIEWS[symbol]
     return _empty_overview(symbol)
