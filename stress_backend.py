@@ -342,17 +342,60 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
     for _ in _yahoo_attempts():
         try:
             ticker = Ticker(symbol, asynchronous=False)
-            modules = ticker.get_modules(
-                [
-                    "price",
-                    "quoteType",
-                    "assetProfile",
-                    "financialData",
-                    "summaryDetail",
-                    "summaryProfile",
-                ]
-            )
-            payload = _symbol_payload(modules, symbol)
+            quotes: dict[str, Any] = {}
+            payload: dict[str, Any] = {}
+            separate_price: dict[str, Any] = {}
+            separate_quote_type: dict[str, Any] = {}
+            separate_asset_profile: dict[str, Any] = {}
+            separate_summary_profile: dict[str, Any] = {}
+            separate_financial_data: dict[str, Any] = {}
+            separate_summary_detail: dict[str, Any] = {}
+
+            try:
+                quotes = _symbol_payload(ticker.quotes, symbol)
+            except Exception:
+                quotes = {}
+
+            try:
+                modules = ticker.get_modules(
+                    [
+                        "price",
+                        "quoteType",
+                        "assetProfile",
+                        "financialData",
+                        "summaryDetail",
+                        "summaryProfile",
+                    ]
+                )
+                payload = _symbol_payload(modules, symbol)
+            except Exception:
+                payload = {}
+
+            try:
+                separate_price = _symbol_payload(ticker.price, symbol)
+            except Exception:
+                separate_price = {}
+            try:
+                separate_quote_type = _symbol_payload(ticker.quote_type, symbol)
+            except Exception:
+                separate_quote_type = {}
+            try:
+                separate_asset_profile = _symbol_payload(ticker.asset_profile, symbol)
+            except Exception:
+                separate_asset_profile = {}
+            try:
+                separate_summary_profile = _symbol_payload(ticker.summary_profile, symbol)
+            except Exception:
+                separate_summary_profile = {}
+            try:
+                separate_financial_data = _symbol_payload(ticker.financial_data, symbol)
+            except Exception:
+                separate_financial_data = {}
+            try:
+                separate_summary_detail = _symbol_payload(ticker.summary_detail, symbol)
+            except Exception:
+                separate_summary_detail = {}
+
             quote_type = _nested_payload(payload, "quoteType")
             asset_profile = _nested_payload(payload, "assetProfile")
             summary_profile = _nested_payload(payload, "summaryProfile")
@@ -360,73 +403,38 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
             financial_data = _nested_payload(payload, "financialData")
             summary_detail = _nested_payload(payload, "summaryDetail")
 
-            if not price or not quote_type or not asset_profile:
-                try:
-                    quotes = _symbol_payload(ticker.quotes, symbol)
-                except Exception:
-                    quotes = {}
-                try:
-                    separate_price = _symbol_payload(ticker.price, symbol)
-                except Exception:
-                    separate_price = {}
-                try:
-                    separate_quote_type = _symbol_payload(ticker.quote_type, symbol)
-                except Exception:
-                    separate_quote_type = {}
-                try:
-                    separate_asset_profile = _symbol_payload(ticker.asset_profile, symbol)
-                except Exception:
-                    separate_asset_profile = {}
-                try:
-                    separate_summary_profile = _symbol_payload(ticker.summary_profile, symbol)
-                except Exception:
-                    separate_summary_profile = {}
-                try:
-                    separate_financial_data = _symbol_payload(ticker.financial_data, symbol)
-                except Exception:
-                    separate_financial_data = {}
-                try:
-                    separate_summary_detail = _symbol_payload(ticker.summary_detail, symbol)
-                except Exception:
-                    separate_summary_detail = {}
-
-                if separate_price or quotes:
-                    merged_price = {}
-                    merged_price.update(quotes)
-                    merged_price.update(separate_price)
-                    merged_price.update(price)
-                    price = merged_price
-                if separate_quote_type:
-                    merged_quote_type = {}
-                    merged_quote_type.update(quotes)
-                    merged_quote_type.update(separate_quote_type)
-                    merged_quote_type.update(quote_type)
-                    quote_type = merged_quote_type
-                if separate_asset_profile:
-                    merged_asset_profile = {}
-                    merged_asset_profile.update(separate_asset_profile)
-                    merged_asset_profile.update(asset_profile)
-                    asset_profile = merged_asset_profile
-                if separate_summary_profile:
-                    merged_summary_profile = {}
-                    merged_summary_profile.update(separate_summary_profile)
-                    merged_summary_profile.update(summary_profile)
-                    summary_profile = merged_summary_profile
-                if separate_financial_data:
-                    merged_financial_data = {}
-                    merged_financial_data.update(separate_financial_data)
-                    merged_financial_data.update(financial_data)
-                    financial_data = merged_financial_data
-                if separate_summary_detail:
-                    merged_summary_detail = {}
-                    merged_summary_detail.update(separate_summary_detail)
-                    merged_summary_detail.update(summary_detail)
-                    summary_detail = merged_summary_detail
-                if quotes:
-                    if not price:
-                        price = quotes
-                    if not quote_type:
-                        quote_type = quotes
+            if separate_price or quotes:
+                merged_price = {}
+                merged_price.update(quotes)
+                merged_price.update(separate_price)
+                merged_price.update(price)
+                price = merged_price
+            if separate_quote_type or quotes:
+                merged_quote_type = {}
+                merged_quote_type.update(quotes)
+                merged_quote_type.update(separate_quote_type)
+                merged_quote_type.update(quote_type)
+                quote_type = merged_quote_type
+            if separate_asset_profile:
+                merged_asset_profile = {}
+                merged_asset_profile.update(separate_asset_profile)
+                merged_asset_profile.update(asset_profile)
+                asset_profile = merged_asset_profile
+            if separate_summary_profile:
+                merged_summary_profile = {}
+                merged_summary_profile.update(separate_summary_profile)
+                merged_summary_profile.update(summary_profile)
+                summary_profile = merged_summary_profile
+            if separate_financial_data:
+                merged_financial_data = {}
+                merged_financial_data.update(separate_financial_data)
+                merged_financial_data.update(financial_data)
+                financial_data = merged_financial_data
+            if separate_summary_detail:
+                merged_summary_detail = {}
+                merged_summary_detail.update(separate_summary_detail)
+                merged_summary_detail.update(summary_detail)
+                summary_detail = merged_summary_detail
 
             market_cap = (
                 _to_float(price.get("marketCap"))
