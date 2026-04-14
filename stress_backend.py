@@ -112,6 +112,7 @@ YAHOO_HTTP_CRUMB_URL = f"{YAHOO_HTTP_BASE}/v1/test/getcrumb"
 YAHOO_HTTP_CONSENT_URL = "https://fc.yahoo.com"
 YAHOO_HTTP_TIMEOUT = 20
 YAHOO_HTTP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+_LAST_GOOD_OVERVIEWS: dict[str, CompanyOverview] = {}
 
 
 @dataclass
@@ -352,9 +353,86 @@ def _fetch_quote_summary_modules(symbol: str, modules: list[str]) -> dict[str, A
     raise ValueError(f"Yahoo Finance quoteSummary failed for {symbol}.")
 
 
+def _fetch_quote_summary_modules_with_session(
+    session: requests.Session,
+    symbol: str,
+    modules: list[str],
+    crumb: str,
+) -> dict[str, Any]:
+    url = f"{YAHOO_HTTP_BASE}/v10/finance/quoteSummary/{symbol}"
+    response = session.get(
+        url,
+        params={"modules": ",".join(modules), "crumb": crumb},
+        timeout=YAHOO_HTTP_TIMEOUT,
+    )
+    if response.status_code == 429:
+        raise requests.HTTPError("Yahoo Finance rate limited quoteSummary.", response=response)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Yahoo Finance quoteSummary returned a non-dictionary payload.")
+
+    quote_summary = payload.get("quoteSummary", {})
+    if not isinstance(quote_summary, dict):
+        raise ValueError("Yahoo Finance quoteSummary returned an invalid response envelope.")
+
+    result = quote_summary.get("result") or []
+    if result and isinstance(result[0], dict):
+        return result[0]
+
+    error = quote_summary.get("error")
+    if error:
+        if isinstance(error, dict):
+            description = error.get("description") or error.get("code") or str(error)
+        else:
+            description = str(error)
+        raise ValueError(f"Yahoo Finance quoteSummary returned no result for {symbol}: {description}")
+
+    raise ValueError(f"Yahoo Finance quoteSummary returned no result for {symbol}.")
+
+
 def _fetch_company_overview_via_http(symbol: str) -> CompanyOverview:
-    quote_payload = _fetch_quote_summary_modules(symbol, ["price", "assetProfile"])
-    profile_payload = _fetch_quote_summary_modules(symbol, ["financialData", "defaultKeyStatistics", "summaryDetail"])
+    quote_payload: dict[str, Any] = {}
+    profile_payload: dict[str, Any] = {}
+    last_error: Exception | None = None
+
+    for attempt_index, delay in enumerate(YAHOO_RETRY_DELAYS):
+        if delay > 0:
+            time.sleep(delay)
+
+        session = _create_yahoo_http_session()
+        try:
+            crumb = _get_yahoo_http_crumb(session)
+        except Exception as exc:
+            last_error = exc
+            if attempt_index == len(YAHOO_RETRY_DELAYS) - 1:
+                break
+            continue
+
+        try:
+            quote_payload = _fetch_quote_summary_modules_with_session(session, symbol, ["price", "assetProfile"], crumb)
+        except Exception as exc:
+            last_error = exc
+            quote_payload = {}
+
+        try:
+            profile_payload = _fetch_quote_summary_modules_with_session(
+                session,
+                symbol,
+                ["financialData", "defaultKeyStatistics", "summaryDetail"],
+                crumb,
+            )
+        except Exception as exc:
+            last_error = exc
+            profile_payload = {}
+
+        if quote_payload or profile_payload:
+            break
+
+    if not quote_payload and not profile_payload:
+        if last_error is not None:
+            raise last_error
+        raise ValueError(f"Yahoo Finance quoteSummary failed for {symbol}.")
 
     price = quote_payload.get("price", {}) if isinstance(quote_payload.get("price"), dict) else {}
     asset_profile = quote_payload.get("assetProfile", {}) if isinstance(quote_payload.get("assetProfile"), dict) else {}
@@ -451,6 +529,35 @@ def _merge_company_overview(primary: CompanyOverview, secondary: CompanyOverview
     )
 
 
+def _overview_score(overview: CompanyOverview) -> int:
+    score = 0
+    if overview.current_price is not None:
+        score += 1
+    if overview.market_cap_m is not None:
+        score += 1
+    if bool((overview.summary or "").strip()):
+        score += 1
+    if overview.long_name and overview.long_name != overview.ticker:
+        score += 1
+    if overview.sector:
+        score += 1
+    if overview.industry:
+        score += 1
+    return score
+
+
+def _remember_best_overview(symbol: str, overview: CompanyOverview) -> CompanyOverview:
+    existing = _LAST_GOOD_OVERVIEWS.get(symbol)
+    if existing is None:
+        _LAST_GOOD_OVERVIEWS[symbol] = overview
+        return overview
+
+    merged = _merge_company_overview(overview, existing)
+    best = merged if _overview_score(merged) >= _overview_score(existing) else existing
+    _LAST_GOOD_OVERVIEWS[symbol] = best
+    return best
+
+
 def fetch_company_overview(symbol: str) -> CompanyOverview:
     symbol = symbol.upper().strip()
     direct_overview: CompanyOverview | None = None
@@ -467,11 +574,14 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
         yahooquery_overview = None
 
     if direct_overview and yahooquery_overview:
-        return _merge_company_overview(direct_overview, yahooquery_overview)
+        combined = _merge_company_overview(direct_overview, yahooquery_overview)
+        return _remember_best_overview(symbol, combined)
     if direct_overview:
-        return direct_overview
+        return _remember_best_overview(symbol, direct_overview)
     if yahooquery_overview:
-        return yahooquery_overview
+        return _remember_best_overview(symbol, yahooquery_overview)
+    if symbol in _LAST_GOOD_OVERVIEWS:
+        return _LAST_GOOD_OVERVIEWS[symbol]
     return _empty_overview(symbol)
 
 
