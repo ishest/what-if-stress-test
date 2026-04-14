@@ -10,6 +10,12 @@ def main() -> None:
     scenario_library, _, defaults = load_workbook_model()
     for symbol in ["GM", "AAPL", "KO"]:
         dataset = build_historical_dataset(symbol)
+        if dataset.overview.current_price is None:
+            raise AssertionError(f"{symbol} overview is missing current price.")
+        if dataset.overview.market_cap_m is None:
+            raise AssertionError(f"{symbol} overview is missing market cap.")
+        if not dataset.overview.summary:
+            raise AssertionError(f"{symbol} overview is missing business summary.")
         matrix = run_all_scenarios(dataset.latest_values, defaults, scenario_library)
         scorecard = build_ratio_scorecard(dataset)
         multiples = build_multiples_snapshot(dataset)

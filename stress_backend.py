@@ -9,6 +9,7 @@ from typing import Any, Callable
 import math
 
 import pandas as pd
+import requests
 from openpyxl import load_workbook
 from yahooquery import Ticker
 
@@ -106,6 +107,11 @@ WATCH_MAX_NET_LEVERAGE = 2.0
 WATCH_MIN_CURRENT_RATIO = 1.0
 CASH_PRESERVATION_MIN = 0.01
 YAHOO_RETRY_DELAYS = (0.0, 0.4, 1.2)
+YAHOO_HTTP_BASE = "https://query2.finance.yahoo.com"
+YAHOO_HTTP_CRUMB_URL = f"{YAHOO_HTTP_BASE}/v1/test/getcrumb"
+YAHOO_HTTP_CONSENT_URL = "https://fc.yahoo.com"
+YAHOO_HTTP_TIMEOUT = 20
+YAHOO_HTTP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
 @dataclass
@@ -245,8 +251,137 @@ def _yahoo_attempts():
         yield
 
 
-def fetch_company_overview(symbol: str) -> CompanyOverview:
-    symbol = symbol.upper().strip()
+def _yahoo_raw(value: Any) -> Any:
+    if isinstance(value, dict):
+        raw = value.get("raw")
+        if raw is not None:
+            return raw
+        if set(value.keys()) == {"fmt"}:
+            return value.get("fmt")
+    return value
+
+
+def _empty_overview(symbol: str) -> CompanyOverview:
+    return CompanyOverview(
+        ticker=symbol,
+        short_name=symbol,
+        long_name=symbol,
+        sector="",
+        industry="",
+        exchange="",
+        currency="",
+        website="",
+        market_cap_m=None,
+        current_price=None,
+        summary="",
+    )
+
+
+def _create_yahoo_http_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": YAHOO_HTTP_USER_AGENT,
+            "Accept": "application/json",
+        }
+    )
+    return session
+
+
+def _get_yahoo_http_crumb(session: requests.Session) -> str:
+    try:
+        session.get(YAHOO_HTTP_CONSENT_URL, allow_redirects=False, timeout=YAHOO_HTTP_TIMEOUT)
+    except requests.RequestException:
+        pass
+
+    response = session.get(YAHOO_HTTP_CRUMB_URL, timeout=YAHOO_HTTP_TIMEOUT)
+    response.raise_for_status()
+    crumb = response.text.strip()
+    if not crumb:
+        raise ValueError("Yahoo Finance returned an empty crumb.")
+    return crumb
+
+
+def _fetch_quote_summary_modules(symbol: str, modules: list[str]) -> dict[str, Any]:
+    last_error: Exception | None = None
+    url = f"{YAHOO_HTTP_BASE}/v10/finance/quoteSummary/{symbol}"
+
+    for attempt_index, delay in enumerate(YAHOO_RETRY_DELAYS):
+        if delay > 0:
+            time.sleep(delay)
+
+        session = _create_yahoo_http_session()
+        try:
+            crumb = _get_yahoo_http_crumb(session)
+            response = session.get(
+                url,
+                params={"modules": ",".join(modules), "crumb": crumb},
+                timeout=YAHOO_HTTP_TIMEOUT,
+            )
+            if response.status_code == 429:
+                raise requests.HTTPError("Yahoo Finance rate limited quoteSummary.", response=response)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Yahoo Finance quoteSummary returned a non-dictionary payload.")
+
+            quote_summary = payload.get("quoteSummary", {})
+            if not isinstance(quote_summary, dict):
+                raise ValueError("Yahoo Finance quoteSummary returned an invalid response envelope.")
+
+            result = quote_summary.get("result") or []
+            if result and isinstance(result[0], dict):
+                return result[0]
+
+            error = quote_summary.get("error")
+            if error:
+                if isinstance(error, dict):
+                    description = error.get("description") or error.get("code") or str(error)
+                else:
+                    description = str(error)
+                raise ValueError(f"Yahoo Finance quoteSummary returned no result for {symbol}: {description}")
+
+            raise ValueError(f"Yahoo Finance quoteSummary returned no result for {symbol}.")
+        except Exception as exc:
+            last_error = exc
+            if attempt_index == len(YAHOO_RETRY_DELAYS) - 1:
+                break
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"Yahoo Finance quoteSummary failed for {symbol}.")
+
+
+def _fetch_company_overview_via_http(symbol: str) -> CompanyOverview:
+    quote_payload = _fetch_quote_summary_modules(symbol, ["price", "assetProfile"])
+    profile_payload = _fetch_quote_summary_modules(symbol, ["financialData", "defaultKeyStatistics", "summaryDetail"])
+
+    price = quote_payload.get("price", {}) if isinstance(quote_payload.get("price"), dict) else {}
+    asset_profile = quote_payload.get("assetProfile", {}) if isinstance(quote_payload.get("assetProfile"), dict) else {}
+    financial_data = profile_payload.get("financialData", {}) if isinstance(profile_payload.get("financialData"), dict) else {}
+
+    market_cap = _to_float(_yahoo_raw(price.get("marketCap"))) or _to_float(_yahoo_raw(financial_data.get("marketCap")))
+    current_price = _to_float(_yahoo_raw(price.get("regularMarketPrice"))) or _to_float(_yahoo_raw(financial_data.get("currentPrice")))
+
+    short_name = str(price.get("shortName") or symbol)
+    long_name = str(price.get("longName") or short_name or symbol)
+
+    return CompanyOverview(
+        ticker=symbol,
+        short_name=short_name,
+        long_name=long_name,
+        sector=str(asset_profile.get("sector") or asset_profile.get("sectorDisp") or ""),
+        industry=str(asset_profile.get("industry") or asset_profile.get("industryDisp") or ""),
+        exchange=str(price.get("exchangeName") or price.get("fullExchangeName") or price.get("exchange") or ""),
+        currency=str(price.get("currency") or financial_data.get("financialCurrency") or ""),
+        website=str(asset_profile.get("website") or ""),
+        market_cap_m=_to_millions(market_cap),
+        current_price=current_price,
+        summary=str(asset_profile.get("longBusinessSummary") or ""),
+    )
+
+
+def _fetch_company_overview_via_yahooquery(symbol: str) -> CompanyOverview:
     ticker = Ticker(symbol, asynchronous=False)
 
     try:
@@ -289,6 +424,55 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
         current_price=current_price,
         summary=str(asset_profile.get("longBusinessSummary") or ""),
     )
+
+
+def _merge_company_overview(primary: CompanyOverview, secondary: CompanyOverview) -> CompanyOverview:
+    symbol = primary.ticker or secondary.ticker
+
+    def choose_text(primary_value: str, secondary_value: str, *, fallback_symbol: bool = False) -> str:
+        cleaned_primary = (primary_value or "").strip()
+        cleaned_secondary = (secondary_value or "").strip()
+        if fallback_symbol and cleaned_primary == symbol and cleaned_secondary and cleaned_secondary != symbol:
+            return cleaned_secondary
+        return cleaned_primary or cleaned_secondary or (symbol if fallback_symbol else "")
+
+    return CompanyOverview(
+        ticker=symbol,
+        short_name=choose_text(primary.short_name, secondary.short_name, fallback_symbol=True),
+        long_name=choose_text(primary.long_name, secondary.long_name, fallback_symbol=True),
+        sector=choose_text(primary.sector, secondary.sector),
+        industry=choose_text(primary.industry, secondary.industry),
+        exchange=choose_text(primary.exchange, secondary.exchange),
+        currency=choose_text(primary.currency, secondary.currency),
+        website=choose_text(primary.website, secondary.website),
+        market_cap_m=primary.market_cap_m if primary.market_cap_m is not None else secondary.market_cap_m,
+        current_price=primary.current_price if primary.current_price is not None else secondary.current_price,
+        summary=choose_text(primary.summary, secondary.summary),
+    )
+
+
+def fetch_company_overview(symbol: str) -> CompanyOverview:
+    symbol = symbol.upper().strip()
+    direct_overview: CompanyOverview | None = None
+    yahooquery_overview: CompanyOverview | None = None
+
+    try:
+        direct_overview = _fetch_company_overview_via_http(symbol)
+    except Exception:
+        direct_overview = None
+
+    try:
+        yahooquery_overview = _fetch_company_overview_via_yahooquery(symbol)
+    except Exception:
+        yahooquery_overview = None
+
+    if direct_overview and yahooquery_overview:
+        return _merge_company_overview(direct_overview, yahooquery_overview)
+    if direct_overview:
+        return direct_overview
+    if yahooquery_overview:
+        return yahooquery_overview
+    return _empty_overview(symbol)
 
 
 @lru_cache(maxsize=1)
