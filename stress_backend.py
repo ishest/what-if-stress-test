@@ -306,6 +306,11 @@ def _first_non_empty_str(*values: Any) -> str:
     return ""
 
 
+def _nested_payload(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    value = payload.get(key, {})
+    return value if isinstance(value, dict) else {}
+
+
 @lru_cache(maxsize=1)
 def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.DataFrame, pd.DataFrame, ThresholdSettings]:
     scenario_library = pd.read_excel(workbook_path, sheet_name="Scenario_Library", header=2, engine="openpyxl")
@@ -348,21 +353,91 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
                 ]
             )
             payload = _symbol_payload(modules, symbol)
-            quote_type = payload.get("quoteType", {}) if isinstance(payload.get("quoteType"), dict) else {}
-            asset_profile = payload.get("assetProfile", {}) if isinstance(payload.get("assetProfile"), dict) else {}
-            summary_profile = payload.get("summaryProfile", {}) if isinstance(payload.get("summaryProfile"), dict) else {}
-            price = payload.get("price", {}) if isinstance(payload.get("price"), dict) else {}
-            financial_data = payload.get("financialData", {}) if isinstance(payload.get("financialData"), dict) else {}
-            summary_detail = payload.get("summaryDetail", {}) if isinstance(payload.get("summaryDetail"), dict) else {}
+            quote_type = _nested_payload(payload, "quoteType")
+            asset_profile = _nested_payload(payload, "assetProfile")
+            summary_profile = _nested_payload(payload, "summaryProfile")
+            price = _nested_payload(payload, "price")
+            financial_data = _nested_payload(payload, "financialData")
+            summary_detail = _nested_payload(payload, "summaryDetail")
+
+            if not price or not quote_type or not asset_profile:
+                try:
+                    quotes = _symbol_payload(ticker.quotes, symbol)
+                except Exception:
+                    quotes = {}
+                try:
+                    separate_price = _symbol_payload(ticker.price, symbol)
+                except Exception:
+                    separate_price = {}
+                try:
+                    separate_quote_type = _symbol_payload(ticker.quote_type, symbol)
+                except Exception:
+                    separate_quote_type = {}
+                try:
+                    separate_asset_profile = _symbol_payload(ticker.asset_profile, symbol)
+                except Exception:
+                    separate_asset_profile = {}
+                try:
+                    separate_summary_profile = _symbol_payload(ticker.summary_profile, symbol)
+                except Exception:
+                    separate_summary_profile = {}
+                try:
+                    separate_financial_data = _symbol_payload(ticker.financial_data, symbol)
+                except Exception:
+                    separate_financial_data = {}
+                try:
+                    separate_summary_detail = _symbol_payload(ticker.summary_detail, symbol)
+                except Exception:
+                    separate_summary_detail = {}
+
+                if separate_price or quotes:
+                    merged_price = {}
+                    merged_price.update(quotes)
+                    merged_price.update(separate_price)
+                    merged_price.update(price)
+                    price = merged_price
+                if separate_quote_type:
+                    merged_quote_type = {}
+                    merged_quote_type.update(quotes)
+                    merged_quote_type.update(separate_quote_type)
+                    merged_quote_type.update(quote_type)
+                    quote_type = merged_quote_type
+                if separate_asset_profile:
+                    merged_asset_profile = {}
+                    merged_asset_profile.update(separate_asset_profile)
+                    merged_asset_profile.update(asset_profile)
+                    asset_profile = merged_asset_profile
+                if separate_summary_profile:
+                    merged_summary_profile = {}
+                    merged_summary_profile.update(separate_summary_profile)
+                    merged_summary_profile.update(summary_profile)
+                    summary_profile = merged_summary_profile
+                if separate_financial_data:
+                    merged_financial_data = {}
+                    merged_financial_data.update(separate_financial_data)
+                    merged_financial_data.update(financial_data)
+                    financial_data = merged_financial_data
+                if separate_summary_detail:
+                    merged_summary_detail = {}
+                    merged_summary_detail.update(separate_summary_detail)
+                    merged_summary_detail.update(summary_detail)
+                    summary_detail = merged_summary_detail
+                if quotes:
+                    if not price:
+                        price = quotes
+                    if not quote_type:
+                        quote_type = quotes
 
             market_cap = (
                 _to_float(price.get("marketCap"))
+                or _to_float(quote_type.get("marketCap"))
                 or _to_float(summary_detail.get("marketCap"))
                 or _to_float(summary_detail.get("nonDilutedMarketCap"))
                 or _to_float(financial_data.get("marketCap"))
             )
             current_price = (
                 _to_float(price.get("regularMarketPrice"))
+                or _to_float(quote_type.get("regularMarketPrice"))
                 or _to_float(financial_data.get("currentPrice"))
                 or _to_float(summary_detail.get("previousClose"))
                 or _to_float(summary_detail.get("regularMarketPreviousClose"))
@@ -370,11 +445,13 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
             short_name = _first_non_empty_str(
                 quote_type.get("shortName"),
                 price.get("shortName"),
+                quote_type.get("displayName"),
                 symbol,
             )
             long_name = _first_non_empty_str(
                 quote_type.get("longName"),
                 price.get("longName"),
+                quote_type.get("displayName"),
                 short_name,
                 symbol,
             )

@@ -1004,17 +1004,29 @@ def _overview_score(overview) -> int:
     return score
 
 
+def _overview_session_key(ticker: str) -> str:
+    return f"_last_good_overview::{ticker.upper().strip()}"
+
+
 def refresh_company_overview(dataset):
+    ticker = dataset.overview.ticker.upper().strip()
+    cached_overview = st.session_state.get(_overview_session_key(ticker))
+    if cached_overview is not None and _overview_score(cached_overview) > _overview_score(dataset.overview):
+        dataset.overview = cached_overview
+
     try:
-        fresh_overview = load_company_overview(dataset.overview.ticker)
+        fresh_overview = load_company_overview(ticker)
     except Exception:
+        cached_overview = st.session_state.get(_overview_session_key(ticker))
+        if cached_overview is not None and _overview_score(cached_overview) > _overview_score(dataset.overview):
+            dataset.overview = cached_overview
         return dataset
 
     current_score = _overview_score(dataset.overview)
     fresh_score = _overview_score(fresh_overview)
     if current_score <= 2 and fresh_score <= 2:
         try:
-            direct_overview = fetch_company_overview(dataset.overview.ticker)
+            direct_overview = fetch_company_overview(ticker)
         except Exception:
             direct_overview = None
         if direct_overview is not None and _overview_score(direct_overview) > fresh_score:
@@ -1023,9 +1035,7 @@ def refresh_company_overview(dataset):
 
     if fresh_score > current_score:
         dataset.overview = fresh_overview
-        return dataset
-
-    if (
+    elif (
         fresh_score == current_score
         and (
             fresh_overview.current_price is not None
@@ -1034,6 +1044,13 @@ def refresh_company_overview(dataset):
         )
     ):
         dataset.overview = fresh_overview
+
+    if _overview_score(dataset.overview) >= 4:
+        st.session_state[_overview_session_key(ticker)] = dataset.overview
+    else:
+        cached_overview = st.session_state.get(_overview_session_key(ticker))
+        if cached_overview is not None and _overview_score(cached_overview) > _overview_score(dataset.overview):
+            dataset.overview = cached_overview
     return dataset
 
 
