@@ -13,6 +13,7 @@ from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
 from multiples import build_multiples_snapshot
 from stock_scoring import build_stock_scoring_model
 from stress_backend import (
+    CompanyOverview,
     DISTRESS_MAX_NET_LEVERAGE,
     DISTRESS_MIN_CURRENT_RATIO,
     DISTRESS_MIN_ENDING_CASH,
@@ -20,6 +21,7 @@ from stress_backend import (
     StressModelDataError,
     ThresholdSettings,
     build_historical_dataset,
+    fetch_company_overview,
     get_selected_scenario,
     load_workbook_model,
     prepare_latest_for_stress,
@@ -977,6 +979,73 @@ def load_model():
 
 def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
+
+
+def _overview_score(overview: CompanyOverview | None) -> int:
+    if overview is None:
+        return -1
+    score = 0
+    if overview.current_price is not None:
+        score += 1
+    if overview.market_cap_m is not None:
+        score += 1
+    if bool((overview.summary or "").strip()):
+        score += 1
+    if overview.long_name and overview.long_name != overview.ticker:
+        score += 1
+    if overview.sector:
+        score += 1
+    if overview.industry:
+        score += 1
+    return score
+
+
+def _merge_overviews(primary: CompanyOverview | None, secondary: CompanyOverview | None, ticker: str) -> CompanyOverview | None:
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+
+    def choose_text(primary_value: str, secondary_value: str, *, fallback_symbol: bool = False) -> str:
+        cleaned_primary = (primary_value or "").strip()
+        cleaned_secondary = (secondary_value or "").strip()
+        if fallback_symbol and cleaned_primary == ticker and cleaned_secondary and cleaned_secondary != ticker:
+            return cleaned_secondary
+        return cleaned_primary or cleaned_secondary or (ticker if fallback_symbol else "")
+
+    return CompanyOverview(
+        ticker=ticker,
+        short_name=choose_text(primary.short_name, secondary.short_name, fallback_symbol=True),
+        long_name=choose_text(primary.long_name, secondary.long_name, fallback_symbol=True),
+        sector=choose_text(primary.sector, secondary.sector),
+        industry=choose_text(primary.industry, secondary.industry),
+        exchange=choose_text(primary.exchange, secondary.exchange),
+        currency=choose_text(primary.currency, secondary.currency),
+        website=choose_text(primary.website, secondary.website),
+        market_cap_m=primary.market_cap_m if primary.market_cap_m is not None else secondary.market_cap_m,
+        current_price=primary.current_price if primary.current_price is not None else secondary.current_price,
+        summary=choose_text(primary.summary, secondary.summary),
+    )
+
+
+def _repair_dataset_overview(dataset, active_ticker: str):
+    session_overviews = st.session_state.setdefault("last_good_overviews", {})
+    best_overview = _merge_overviews(dataset.overview, session_overviews.get(active_ticker), active_ticker)
+
+    if _overview_score(best_overview) < 3:
+        try:
+            fresh_overview = fetch_company_overview(active_ticker)
+        except Exception:
+            fresh_overview = None
+        best_overview = _merge_overviews(fresh_overview, best_overview, active_ticker)
+
+    if best_overview is not None:
+        previous_best = session_overviews.get(active_ticker)
+        if _overview_score(best_overview) >= _overview_score(previous_best):
+            session_overviews[active_ticker] = best_overview
+        dataset.overview = session_overviews.get(active_ticker, best_overview)
+
+    return dataset
 
 
 def _first_quartile_series(series: pd.Series, lower: float | None = None, upper: float | None = None) -> float | None:
@@ -2149,6 +2218,8 @@ def main():
         st.error(f"Could not load Yahoo Finance data for `{active_ticker}`.")
         st.code(str(exc))
         st.stop()
+
+    dataset = _repair_dataset_overview(dataset, active_ticker)
 
     calibration = build_threshold_calibration(dataset, default_thresholds)
     thresholds = thresholds_from_sidebar(calibration, active_ticker)
