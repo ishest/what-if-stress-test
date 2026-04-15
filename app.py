@@ -11,6 +11,7 @@ import streamlit as st
 
 from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
 from multiples import build_multiples_snapshot
+from quarterly_charts import QuarterlyChartBundle, build_quarterly_chart_bundle
 from stock_scoring import build_stock_scoring_model
 from stress_backend import (
     CompanyOverview,
@@ -983,6 +984,11 @@ def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_quarterly_chart_bundle(symbol: str):
+    return build_quarterly_chart_bundle(symbol.upper().strip())
+
+
 def _overview_score(overview: CompanyOverview | None) -> int:
     if overview is None:
         return -1
@@ -1779,6 +1785,139 @@ def render_stock_scoring_model(dataset):
         st.dataframe(model.category_tables[category], use_container_width=True, hide_index=True)
 
 
+def _quarterly_line_chart(
+    frame: pd.DataFrame,
+    *,
+    title: str,
+    y_title: str,
+    dashed_series: set[str] | None = None,
+) -> go.Figure:
+    dashed_series = dashed_series or set()
+    figure = go.Figure()
+    x_values = frame["Quarter"]
+    palette = px.colors.qualitative.Set2 + px.colors.qualitative.Bold
+
+    for idx, column in enumerate(frame.columns):
+        if column == "Quarter":
+            continue
+        figure.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=frame[column],
+                mode="lines+markers",
+                name=column,
+                line={
+                    "width": 3 if column not in dashed_series else 2.5,
+                    "dash": "dash" if column in dashed_series else "solid",
+                    "color": palette[idx % len(palette)],
+                },
+                marker={"size": 7},
+                hovertemplate=f"%{{x}}<br>{column}: %{{y:,.2f}}<extra></extra>",
+            )
+        )
+
+    figure.update_layout(
+        title=title,
+        margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        xaxis_title="Quarter",
+        yaxis_title=y_title,
+        template="plotly_white",
+    )
+    return figure
+
+
+def render_quarterly_charts(active_ticker: str):
+    st.subheader("Charts")
+    st.caption(
+        "These charts load separately from the main stress-test model. "
+        "Quarterly balance-sheet lines use quarter-end values. Revenue, profit, profitability, and margin charts use trailing four quarters."
+    )
+
+    request_key = f"quarterly_charts_requested::{active_ticker}"
+    button_key = f"quarterly_charts_button::{active_ticker}"
+
+    if st.button("Load quarterly charts", key=button_key):
+        st.session_state[request_key] = True
+
+    if not st.session_state.get(request_key, False):
+        st.info(
+            "Quarterly charts are kept on a separate on-demand path so they do not slow down the main app. "
+            "Click `Load quarterly charts` when you want them."
+        )
+        return
+
+    try:
+        with st.spinner(f"Loading quarterly Yahoo Finance data for {active_ticker}..."):
+            bundle = load_quarterly_chart_bundle(active_ticker)
+    except Exception as exc:
+        st.warning(
+            "Quarterly charts are unavailable for this ticker right now. "
+            "The main stress-test model is still separate and unaffected."
+        )
+        st.code(str(exc))
+        return
+
+    if bundle.warnings:
+        with st.expander("Quarterly chart data notes", expanded=False):
+            for note in bundle.warnings:
+                st.write(f"- {note}")
+
+    first_row = st.columns(2)
+    with first_row[0]:
+        if bundle.revenue_profit.empty:
+            st.info("Revenue and profit chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(
+                    bundle.revenue_profit,
+                    title="#1 Revenue vs Profit (TTM)",
+                    y_title="$mm",
+                ),
+                use_container_width=True,
+            )
+    with first_row[1]:
+        if bundle.assets_liabilities.empty:
+            st.info("Assets and liabilities chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(
+                    bundle.assets_liabilities,
+                    title="#6 Assets and Liabilities",
+                    y_title="$mm",
+                    dashed_series={"Total Liabilities", "Current Liabilities", "Non-current Liabilities"},
+                ),
+                use_container_width=True,
+            )
+
+    second_row = st.columns(2)
+    with second_row[0]:
+        if bundle.profitability.empty:
+            st.info("Profitability returns chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(
+                    bundle.profitability,
+                    title="#20 Profitability - ROIC - ROE - ROA",
+                    y_title="%",
+                ),
+                use_container_width=True,
+            )
+    with second_row[1]:
+        if bundle.margins.empty:
+            st.info("Margin chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(
+                    bundle.margins,
+                    title="#21 Profitability Margins",
+                    y_title="%",
+                ),
+                use_container_width=True,
+            )
+
+
 def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds: ThresholdSettings):
     st.subheader("Selected Scenario Dashboard")
     sequence_options = scenario_library["Sequence"].dropna().unique().tolist()
@@ -2241,6 +2380,7 @@ def main():
             "Financial Ratios",
             "Multiples",
             "Scoring Model",
+            "Charts",
             "Historicals",
             "Scenario Matrix",
             "Sequence Map",
@@ -2269,15 +2409,17 @@ def main():
     with tabs[5]:
         render_stock_scoring_model(dataset)
     with tabs[6]:
-        render_historical(dataset)
+        render_quarterly_charts(active_ticker)
     with tabs[7]:
+        render_historical(dataset)
+    with tabs[8]:
         if scenario_matrix is None:
             render_stress_unavailable(stress_error)
         else:
             render_scenario_matrix(dataset, scenario_matrix)
-    with tabs[8]:
-        render_sequence_library(sequence_map)
     with tabs[9]:
+        render_sequence_library(sequence_map)
+    with tabs[10]:
         render_faq()
 
 
