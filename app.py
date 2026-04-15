@@ -11,7 +11,6 @@ import streamlit as st
 
 from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
 from multiples import build_multiples_snapshot
-from quarterly_charts import build_quarterly_chart_frame
 from stock_scoring import build_stock_scoring_model
 from stress_backend import (
     CompanyOverview,
@@ -978,7 +977,6 @@ def load_model():
     return load_workbook_model()
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
 def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
 
@@ -1033,6 +1031,13 @@ def _merge_overviews(primary: CompanyOverview | None, secondary: CompanyOverview
 def _repair_dataset_overview(dataset, active_ticker: str):
     session_overviews = st.session_state.setdefault("last_good_overviews", {})
     best_overview = _merge_overviews(dataset.overview, session_overviews.get(active_ticker), active_ticker)
+
+    if _overview_score(best_overview) < 3:
+        try:
+            fresh_overview = fetch_company_overview(active_ticker)
+        except Exception:
+            fresh_overview = None
+        best_overview = _merge_overviews(fresh_overview, best_overview, active_ticker)
 
     if best_overview is not None:
         previous_best = session_overviews.get(active_ticker)
@@ -1653,184 +1658,6 @@ def render_historical(dataset):
         st.dataframe(source_df, use_container_width=True, hide_index=True)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _get_quarterly_chart_frame(symbol: str) -> tuple[pd.DataFrame, list[str]]:
-    return build_quarterly_chart_frame(symbol)
-
-
-def _build_dark_line_chart(
-    frame: pd.DataFrame,
-    series_specs: list[tuple[str, str, str, str]],
-    title: str,
-    yaxis_title: str,
-    *,
-    percent: bool = False,
-) -> go.Figure:
-    fig = go.Figure()
-
-    for column, label, color, dash in series_specs:
-        if column not in frame.columns:
-            continue
-        series = pd.to_numeric(frame[column], errors="coerce")
-        if series.dropna().empty:
-            continue
-
-        hover_format = "%{y:.1%}" if percent else "%{y:,.1f}"
-        fig.add_trace(
-            go.Scatter(
-                x=frame["asOfDate"],
-                y=series,
-                mode="lines+markers",
-                name=label,
-                line={"color": color, "width": 3, "dash": dash},
-                marker={"size": 7},
-                hovertemplate=f"%{{x|%b %Y}}<br>{label}: {hover_format}<extra></extra>",
-            )
-        )
-
-        last_valid_index = series.last_valid_index()
-        if last_valid_index is not None:
-            value = series.loc[last_valid_index]
-            label_text = f"{value:.0%}" if percent else f"{value:,.0f}"
-            fig.add_trace(
-                go.Scatter(
-                    x=[frame.loc[last_valid_index, "asOfDate"]],
-                    y=[value],
-                    mode="text",
-                    text=[label_text],
-                    textposition="top center",
-                    textfont={"color": "#d6d6d6", "size": 12},
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
-
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#222733",
-        plot_bgcolor="#222733",
-        title={"text": title, "x": 0.5, "xanchor": "center"},
-        margin={"l": 20, "r": 20, "t": 60, "b": 50},
-        height=430,
-        hovermode="x unified",
-        legend={"orientation": "h", "yanchor": "top", "y": -0.18, "xanchor": "left", "x": 0.0},
-        yaxis={"title": yaxis_title, "tickformat": ".0%" if percent else ",.0f", "gridcolor": "#3b4151"},
-        xaxis={"title": "", "tickformat": "%b\n%Y", "gridcolor": "#303744"},
-    )
-    return fig
-
-
-def render_charts(dataset):
-    st.subheader("Charts")
-    st.caption(
-        "These charts use Yahoo Finance quarterly (`3M`) statement data. "
-        "Revenue, profit, assets, and liabilities are shown as quarterly values. "
-        "ROIC, ROE, and ROA are shown as trailing-four-quarter ratios at each quarter-end."
-    )
-
-    symbol = getattr(getattr(dataset, "overview", None), "ticker", None)
-    if not symbol:
-        st.warning("The active ticker is unavailable, so the charts cannot be built.")
-        return
-
-    try:
-        frame, quarterly_warnings = _get_quarterly_chart_frame(symbol)
-    except Exception as exc:
-        st.warning("Quarterly charts are temporarily unavailable for this ticker.")
-        with st.expander("Quarterly chart error details", expanded=False):
-            st.write(f"- {exc}")
-        return
-
-    if frame.empty:
-        st.warning("Yahoo Finance did not return enough quarterly statement data to build the charts for this ticker.")
-        return
-
-    if quarterly_warnings:
-        with st.expander("Quarterly data notes", expanded=False):
-            for warning in quarterly_warnings:
-                st.write(f"- {warning}")
-
-    revenue_specs = [
-        ("Revenue", "Revenue", "#2f7ed8", "solid"),
-        ("Gross Profit", "Gross Profit", "#00d2d3", "solid"),
-        ("EBIT", "EBIT", "#f5a25d", "solid"),
-        ("Net Income", "Net Profit", "#2ecc71", "solid"),
-    ]
-    balance_specs = [
-        ("Total Assets", "Total Assets", "#21ff3f", "solid"),
-        ("Cash & Equivalents", "Cash", "#00d16a", "solid"),
-        ("Current Assets", "Current assets", "#8fd35a", "solid"),
-        ("Non-current Assets", "Non-current assets", "#567d1f", "solid"),
-        ("Total Liabilities", "Total Liabilities", "#ff3b30", "dash"),
-        ("Current Liabilities", "Current Liabilities", "#ff7b5a", "dash"),
-        ("Non-current Liabilities", "Non-current Liabilities", "#ffb0a8", "dash"),
-    ]
-    returns_specs = [
-        ("ROIC TTM %", "Return on Invested Capital", "#7f1d8d", "solid"),
-        ("ROE TTM %", "Return on Equity", "#6d28d9", "solid"),
-        ("ROA TTM %", "Return on Assets", "#c4a1ff", "solid"),
-    ]
-    margin_specs = [
-        ("Gross Margin %", "Gross profit %", "#00c2b2", "solid"),
-        ("EBIT Margin %", "EBIT Margin %", "#00a676", "solid"),
-        ("Net Margin %", "Net income %", "#22c55e", "solid"),
-    ]
-
-    top_left, top_right = st.columns(2)
-    with top_left:
-        st.plotly_chart(
-            _build_dark_line_chart(frame, revenue_specs, "#1 Revenue vs Profit", "Statement value ($mm)"),
-            use_container_width=True,
-        )
-    with top_right:
-        st.plotly_chart(
-            _build_dark_line_chart(frame, balance_specs, "#6 Assets and Liabilities", "Balance sheet value ($mm)"),
-            use_container_width=True,
-        )
-
-    bottom_left, bottom_right = st.columns(2)
-    with bottom_left:
-        st.plotly_chart(
-            _build_dark_line_chart(frame, returns_specs, "#20 Profitability - ROIC - ROE - ROA", "TTM return", percent=True),
-            use_container_width=True,
-        )
-    with bottom_right:
-        st.plotly_chart(
-            _build_dark_line_chart(frame, margin_specs, "#21 Profitability Margins", "Quarterly margin", percent=True),
-            use_container_width=True,
-        )
-
-    with st.expander("Quarterly data used in charts", expanded=False):
-        display_columns = [
-            "Quarter Label",
-            "Revenue",
-            "Gross Profit",
-            "EBIT",
-            "Net Income",
-            "Cash & Equivalents",
-            "Current Assets",
-            "Current Liabilities",
-            "Total Assets",
-            "Total Liabilities",
-            "Gross Margin %",
-            "EBIT Margin %",
-            "Net Margin %",
-            "ROIC TTM %",
-            "ROE TTM %",
-            "ROA TTM %",
-        ]
-        available_columns = [column for column in display_columns if column in frame.columns]
-        display_frame = frame[available_columns].copy()
-        for column in display_frame.columns:
-            if column == "Quarter Label":
-                continue
-            if column.endswith("%"):
-                display_frame[column] = display_frame[column].map(format_pct)
-            else:
-                display_frame[column] = display_frame[column].map(format_m)
-        st.dataframe(display_frame, use_container_width=True, hide_index=True)
-
-
 def render_ratio_scorecard(dataset):
     st.subheader("Financial Ratio Scorecard")
     st.caption(
@@ -2419,7 +2246,6 @@ def main():
             "Financial Ratios",
             "Multiples",
             "Scoring Model",
-            "Charts",
             "Historicals",
             "Scenario Matrix",
             "Sequence Map",
@@ -2448,17 +2274,15 @@ def main():
     with tabs[5]:
         render_stock_scoring_model(dataset)
     with tabs[6]:
-        render_charts(dataset)
-    with tabs[7]:
         render_historical(dataset)
-    with tabs[8]:
+    with tabs[7]:
         if scenario_matrix is None:
             render_stress_unavailable(stress_error)
         else:
             render_scenario_matrix(dataset, scenario_matrix)
-    with tabs[9]:
+    with tabs[8]:
         render_sequence_library(sequence_map)
-    with tabs[10]:
+    with tabs[9]:
         render_faq()
 
 
