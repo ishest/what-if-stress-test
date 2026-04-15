@@ -978,6 +978,7 @@ def load_model():
     return load_workbook_model()
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def load_company(symbol: str):
     return build_historical_dataset(symbol.upper().strip())
 
@@ -1032,13 +1033,6 @@ def _merge_overviews(primary: CompanyOverview | None, secondary: CompanyOverview
 def _repair_dataset_overview(dataset, active_ticker: str):
     session_overviews = st.session_state.setdefault("last_good_overviews", {})
     best_overview = _merge_overviews(dataset.overview, session_overviews.get(active_ticker), active_ticker)
-
-    if _overview_score(best_overview) < 3:
-        try:
-            fresh_overview = fetch_company_overview(active_ticker)
-        except Exception:
-            fresh_overview = None
-        best_overview = _merge_overviews(fresh_overview, best_overview, active_ticker)
 
     if best_overview is not None:
         previous_best = session_overviews.get(active_ticker)

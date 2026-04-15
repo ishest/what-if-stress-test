@@ -1305,18 +1305,6 @@ def build_historical_dataset(symbol: str) -> HistoricalDataset:
     annual_raw = fetch_annual_financials(symbol)
     overview = fetch_company_overview(symbol)
     financials, sources, warnings = map_historical_financials(annual_raw)
-    quarterly_raw = None
-    quarterly_financials = None
-    quarterly_sources = None
-    quarterly_warnings: list[str] = []
-    try:
-        quarterly_raw = fetch_quarterly_financials(symbol)
-        quarterly_financials, quarterly_sources, quarterly_warnings = map_historical_financials(
-            quarterly_raw,
-            label_column="Period Label",
-        )
-    except Exception as exc:
-        quarterly_warnings.append(str(exc))
 
     latest_year = str(financials.columns[-1])
     latest_values = _build_latest_values(financials)
@@ -1341,10 +1329,10 @@ def build_historical_dataset(symbol: str) -> HistoricalDataset:
         warnings=sorted(set(warnings)),
         data_quality_score=data_quality_score,
         sector_warning=sector_warning,
-        quarterly_raw=quarterly_raw,
-        quarterly_financials=quarterly_financials,
-        quarterly_sources=quarterly_sources,
-        quarterly_warnings=sorted(set(quarterly_warnings)),
+        quarterly_raw=None,
+        quarterly_financials=None,
+        quarterly_sources=None,
+        quarterly_warnings=[],
     )
 
 
