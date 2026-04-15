@@ -11,6 +11,7 @@ import streamlit as st
 
 from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
 from multiples import build_multiples_snapshot
+from quarterly_charts import build_quarterly_chart_frame
 from stock_scoring import build_stock_scoring_model
 from stress_backend import (
     CompanyOverview,
@@ -22,10 +23,8 @@ from stress_backend import (
     ThresholdSettings,
     build_historical_dataset,
     fetch_company_overview,
-    fetch_quarterly_financials,
     get_selected_scenario,
     load_workbook_model,
-    map_historical_financials,
     prepare_latest_for_stress,
     run_all_scenarios,
     run_scenario,
@@ -1660,93 +1659,9 @@ def render_historical(dataset):
         st.dataframe(source_df, use_container_width=True, hide_index=True)
 
 
-def _ensure_quarterly_chart_inputs(dataset):
-    quarterly_raw = getattr(dataset, "quarterly_raw", None)
-    quarterly_financials = getattr(dataset, "quarterly_financials", None)
-    quarterly_sources = getattr(dataset, "quarterly_sources", None)
-    quarterly_warnings = list(getattr(dataset, "quarterly_warnings", None) or [])
-
-    quarterly_ready = (
-        quarterly_raw is not None
-        and quarterly_financials is not None
-        and isinstance(quarterly_financials, pd.DataFrame)
-        and not quarterly_financials.empty
-    )
-    if quarterly_ready:
-        return quarterly_raw, quarterly_financials, quarterly_sources, quarterly_warnings
-
-    symbol = getattr(getattr(dataset, "overview", None), "ticker", None)
-    if not symbol:
-        return None, None, None, quarterly_warnings
-
-    try:
-        quarterly_raw = fetch_quarterly_financials(symbol)
-        quarterly_financials, quarterly_sources, map_warnings = map_historical_financials(
-            quarterly_raw,
-            label_column="Period Label",
-        )
-        quarterly_warnings.extend(map_warnings)
-        setattr(dataset, "quarterly_raw", quarterly_raw)
-        setattr(dataset, "quarterly_financials", quarterly_financials)
-        setattr(dataset, "quarterly_sources", quarterly_sources)
-        setattr(dataset, "quarterly_warnings", sorted(set(quarterly_warnings)))
-        return quarterly_raw, quarterly_financials, quarterly_sources, sorted(set(quarterly_warnings))
-    except Exception as exc:
-        quarterly_warnings.append(str(exc))
-        setattr(dataset, "quarterly_warnings", sorted(set(quarterly_warnings)))
-        return None, None, None, sorted(set(quarterly_warnings))
-
-
-def _build_quarterly_chart_frame(dataset) -> pd.DataFrame:
-    quarterly_raw, quarterly_financials, _, _ = _ensure_quarterly_chart_inputs(dataset)
-    if quarterly_raw is None or quarterly_financials is None or quarterly_financials.empty:
-        return pd.DataFrame()
-
-    quarterly_dates = quarterly_raw[["Period Label", "asOfDate"]].copy()
-    quarterly_dates["asOfDate"] = pd.to_datetime(quarterly_dates["asOfDate"], errors="coerce")
-
-    quarterly_wide = quarterly_financials.T.reset_index().rename(columns={"index": "Period Label"})
-    frame = quarterly_dates.merge(quarterly_wide, on="Period Label", how="inner").sort_values("asOfDate").reset_index(drop=True)
-    if frame.empty:
-        return frame
-
-    frame["Quarter Label"] = frame["asOfDate"].dt.strftime("%b %Y")
-    numeric_columns = [column for column in frame.columns if column not in {"Period Label", "Quarter Label", "asOfDate"}]
-    for column in numeric_columns:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
-
-    frame["Non-current Assets"] = frame["Total Assets"] - frame["Current Assets"]
-    frame["Non-current Liabilities"] = frame["Total Liabilities"] - frame["Current Liabilities"]
-    frame["Total Debt"] = frame["Short-term Debt"].fillna(0.0) + frame["Long-term Debt"].fillna(0.0)
-    frame["Invested Capital"] = frame["Total Debt"] + frame["Equity"] - frame["Cash & Equivalents"].fillna(0.0)
-
-    def _average_balance(series: pd.Series) -> pd.Series:
-        annual_avg = (series + series.shift(4)) / 2
-        sequential_avg = (series + series.shift(1)) / 2
-        return annual_avg.where(series.shift(4).notna(), sequential_avg)
-
-    revenue = frame["Revenue"].replace(0.0, pd.NA)
-    frame["Gross Margin %"] = frame["Gross Profit"] / revenue
-    frame["EBIT Margin %"] = frame["EBIT"] / revenue
-    frame["Net Margin %"] = frame["Net Income"] / revenue
-
-    net_income_ttm = frame["Net Income"].rolling(4, min_periods=4).sum()
-    ebit_ttm = frame["EBIT"].rolling(4, min_periods=4).sum()
-    pretax_ttm = frame["Pretax Income"].rolling(4, min_periods=4).sum()
-    taxes_ttm = frame["Taxes"].rolling(4, min_periods=4).sum()
-
-    tax_rate = (taxes_ttm / pretax_ttm.replace(0.0, pd.NA)).where(pretax_ttm > 0)
-    tax_rate = tax_rate.clip(lower=0.0, upper=0.35).fillna(0.21)
-    nopat_ttm = ebit_ttm * (1 - tax_rate)
-
-    avg_assets = _average_balance(frame["Total Assets"]).replace(0.0, pd.NA)
-    avg_equity = _average_balance(frame["Equity"]).replace(0.0, pd.NA)
-    avg_invested_capital = _average_balance(frame["Invested Capital"]).replace(0.0, pd.NA)
-
-    frame["ROA TTM %"] = net_income_ttm / avg_assets
-    frame["ROE TTM %"] = net_income_ttm / avg_equity
-    frame["ROIC TTM %"] = nopat_ttm / avg_invested_capital
-    return frame
+@st.cache_data(show_spinner=False, ttl=3600)
+def _get_quarterly_chart_frame(symbol: str) -> tuple[pd.DataFrame, list[str]]:
+    return build_quarterly_chart_frame(symbol)
 
 
 def _build_dark_line_chart(
@@ -1819,12 +1734,23 @@ def render_charts(dataset):
         "ROIC, ROE, and ROA are shown as trailing-four-quarter ratios at each quarter-end."
     )
 
-    frame = _build_quarterly_chart_frame(dataset)
+    symbol = getattr(getattr(dataset, "overview", None), "ticker", None)
+    if not symbol:
+        st.warning("The active ticker is unavailable, so the charts cannot be built.")
+        return
+
+    try:
+        frame, quarterly_warnings = _get_quarterly_chart_frame(symbol)
+    except Exception as exc:
+        st.warning("Quarterly charts are temporarily unavailable for this ticker.")
+        with st.expander("Quarterly chart error details", expanded=False):
+            st.write(f"- {exc}")
+        return
+
     if frame.empty:
         st.warning("Yahoo Finance did not return enough quarterly statement data to build the charts for this ticker.")
         return
 
-    quarterly_warnings = getattr(dataset, "quarterly_warnings", None) or []
     if quarterly_warnings:
         with st.expander("Quarterly data notes", expanded=False):
             for warning in quarterly_warnings:

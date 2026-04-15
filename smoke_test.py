@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from financial_ratios import build_ratio_scorecard
 from multiples import build_multiples_snapshot
+from quarterly_charts import build_quarterly_chart_frame
 from stock_scoring import build_stock_scoring_model
 from stress_backend import StressModelDataError, build_historical_dataset, load_workbook_model, run_all_scenarios
 
@@ -16,8 +17,9 @@ def main() -> None:
             raise AssertionError(f"{symbol} overview is missing market cap.")
         if not dataset.overview.summary:
             raise AssertionError(f"{symbol} overview is missing business summary.")
-        if dataset.quarterly_financials is None or dataset.quarterly_financials.empty:
-            raise AssertionError(f"{symbol} quarterly financials are missing.")
+        chart_frame, quarterly_warnings = build_quarterly_chart_frame(symbol)
+        if chart_frame.empty:
+            raise AssertionError(f"{symbol} quarterly chart frame is missing.")
         matrix = run_all_scenarios(dataset.latest_values, defaults, scenario_library)
         scorecard = build_ratio_scorecard(dataset)
         multiples = build_multiples_snapshot(dataset)
@@ -25,6 +27,7 @@ def main() -> None:
         counts = matrix["Rating"].value_counts().to_dict()
         print(symbol, "latest_year", dataset.latest_year, "quality", dataset.data_quality_score, "blockers", dataset.blockers)
         print(symbol, "ratings", counts)
+        print(symbol, "quarterly_chart_rows", len(chart_frame), "quarterly_warnings", quarterly_warnings[:2])
         print(symbol, "ratio_total_score", scorecard.summary_scores.get("Total score"))
         print(symbol, "stock_score", scoring_model.overall_score, scoring_model.recommendation)
         if multiples.summary_cards:
