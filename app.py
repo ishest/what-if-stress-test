@@ -29,6 +29,7 @@ from stress_backend import (
     run_scenario,
 )
 
+# Deployment marker to force a clean rebuild after the charts rollback.
 
 st.set_page_config(
     page_title="What If Stress Test",
