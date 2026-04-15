@@ -506,6 +506,32 @@ def _fetch_company_overview_via_yahooquery(symbol: str) -> CompanyOverview:
     )
 
 
+def _fetch_company_overview_via_search(symbol: str) -> CompanyOverview:
+    search = yf.Search(symbol, max_results=10)
+    quotes = getattr(search, "quotes", None) or []
+    quote = next(
+        (item for item in quotes if str(item.get("symbol") or "").upper() == symbol.upper()),
+        quotes[0] if quotes else {},
+    )
+
+    if not isinstance(quote, dict) or not quote:
+        return _empty_overview(symbol)
+
+    return CompanyOverview(
+        ticker=symbol,
+        short_name=str(quote.get("shortname") or symbol),
+        long_name=str(quote.get("longname") or quote.get("shortname") or symbol),
+        sector=str(quote.get("sectorDisp") or quote.get("sector") or ""),
+        industry=str(quote.get("industryDisp") or quote.get("industry") or ""),
+        exchange=str(quote.get("exchDisp") or quote.get("exchange") or ""),
+        currency="",
+        website="",
+        market_cap_m=None,
+        current_price=None,
+        summary="",
+    )
+
+
 def _fetch_company_overview_via_yfinance(symbol: str) -> CompanyOverview:
     ticker = yf.Ticker(symbol)
     fast_info = getattr(ticker, "fast_info", None)
@@ -537,6 +563,30 @@ def _fetch_company_overview_via_yfinance(symbol: str) -> CompanyOverview:
         market_cap_m=_to_millions(market_cap),
         current_price=current_price,
         summary="",
+    )
+
+
+def _fetch_company_profile_enrichment(symbol: str) -> CompanyOverview:
+    ticker = Ticker(symbol, asynchronous=False)
+
+    try:
+        asset_profile_response = ticker.asset_profile
+    except Exception:
+        asset_profile_response = {}
+
+    asset_profile = _symbol_payload(asset_profile_response, symbol)
+    return CompanyOverview(
+        ticker=symbol,
+        short_name=symbol,
+        long_name=symbol,
+        sector=str(asset_profile.get("sector") or ""),
+        industry=str(asset_profile.get("industry") or ""),
+        exchange="",
+        currency="",
+        website=str(asset_profile.get("website") or ""),
+        market_cap_m=None,
+        current_price=None,
+        summary=str(asset_profile.get("longBusinessSummary") or ""),
     )
 
 
@@ -601,8 +651,26 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
     except Exception:
         overview = None
 
-    if overview is not None:
-        return _remember_best_overview(symbol, overview)
+    search_overview: CompanyOverview | None = None
+    try:
+        search_overview = _fetch_company_overview_via_search(symbol)
+    except Exception:
+        search_overview = None
+
+    profile_overview: CompanyOverview | None = None
+    try:
+        profile_overview = _fetch_company_profile_enrichment(symbol)
+    except Exception:
+        profile_overview = None
+
+    combined = overview or _empty_overview(symbol)
+    if search_overview is not None:
+        combined = _merge_company_overview(search_overview, combined)
+    if profile_overview is not None:
+        combined = _merge_company_overview(profile_overview, combined)
+
+    if combined is not None:
+        return _remember_best_overview(symbol, combined)
     if symbol in _LAST_GOOD_OVERVIEWS:
         return _LAST_GOOD_OVERVIEWS[symbol]
     return _empty_overview(symbol)
