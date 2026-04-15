@@ -22,8 +22,10 @@ from stress_backend import (
     ThresholdSettings,
     build_historical_dataset,
     fetch_company_overview,
+    fetch_quarterly_financials,
     get_selected_scenario,
     load_workbook_model,
+    map_historical_financials,
     prepare_latest_for_stress,
     run_all_scenarios,
     run_scenario,
@@ -1658,14 +1660,52 @@ def render_historical(dataset):
         st.dataframe(source_df, use_container_width=True, hide_index=True)
 
 
+def _ensure_quarterly_chart_inputs(dataset):
+    quarterly_raw = getattr(dataset, "quarterly_raw", None)
+    quarterly_financials = getattr(dataset, "quarterly_financials", None)
+    quarterly_sources = getattr(dataset, "quarterly_sources", None)
+    quarterly_warnings = list(getattr(dataset, "quarterly_warnings", None) or [])
+
+    quarterly_ready = (
+        quarterly_raw is not None
+        and quarterly_financials is not None
+        and isinstance(quarterly_financials, pd.DataFrame)
+        and not quarterly_financials.empty
+    )
+    if quarterly_ready:
+        return quarterly_raw, quarterly_financials, quarterly_sources, quarterly_warnings
+
+    symbol = getattr(getattr(dataset, "overview", None), "ticker", None)
+    if not symbol:
+        return None, None, None, quarterly_warnings
+
+    try:
+        quarterly_raw = fetch_quarterly_financials(symbol)
+        quarterly_financials, quarterly_sources, map_warnings = map_historical_financials(
+            quarterly_raw,
+            label_column="Period Label",
+        )
+        quarterly_warnings.extend(map_warnings)
+        setattr(dataset, "quarterly_raw", quarterly_raw)
+        setattr(dataset, "quarterly_financials", quarterly_financials)
+        setattr(dataset, "quarterly_sources", quarterly_sources)
+        setattr(dataset, "quarterly_warnings", sorted(set(quarterly_warnings)))
+        return quarterly_raw, quarterly_financials, quarterly_sources, sorted(set(quarterly_warnings))
+    except Exception as exc:
+        quarterly_warnings.append(str(exc))
+        setattr(dataset, "quarterly_warnings", sorted(set(quarterly_warnings)))
+        return None, None, None, sorted(set(quarterly_warnings))
+
+
 def _build_quarterly_chart_frame(dataset) -> pd.DataFrame:
-    if dataset.quarterly_raw is None or dataset.quarterly_financials is None or dataset.quarterly_financials.empty:
+    quarterly_raw, quarterly_financials, _, _ = _ensure_quarterly_chart_inputs(dataset)
+    if quarterly_raw is None or quarterly_financials is None or quarterly_financials.empty:
         return pd.DataFrame()
 
-    quarterly_dates = dataset.quarterly_raw[["Period Label", "asOfDate"]].copy()
+    quarterly_dates = quarterly_raw[["Period Label", "asOfDate"]].copy()
     quarterly_dates["asOfDate"] = pd.to_datetime(quarterly_dates["asOfDate"], errors="coerce")
 
-    quarterly_wide = dataset.quarterly_financials.T.reset_index().rename(columns={"index": "Period Label"})
+    quarterly_wide = quarterly_financials.T.reset_index().rename(columns={"index": "Period Label"})
     frame = quarterly_dates.merge(quarterly_wide, on="Period Label", how="inner").sort_values("asOfDate").reset_index(drop=True)
     if frame.empty:
         return frame
@@ -1784,9 +1824,10 @@ def render_charts(dataset):
         st.warning("Yahoo Finance did not return enough quarterly statement data to build the charts for this ticker.")
         return
 
-    if dataset.quarterly_warnings:
+    quarterly_warnings = getattr(dataset, "quarterly_warnings", None) or []
+    if quarterly_warnings:
         with st.expander("Quarterly data notes", expanded=False):
-            for warning in dataset.quarterly_warnings:
+            for warning in quarterly_warnings:
                 st.write(f"- {warning}")
 
     revenue_specs = [
