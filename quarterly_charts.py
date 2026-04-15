@@ -75,10 +75,24 @@ def _ttm(series: pd.Series) -> pd.Series:
     return series.rolling(4, min_periods=4).sum()
 
 
+def _rolling_sum(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+    return series.rolling(4, min_periods=1).sum()
+
+
+def _annualized_rolling_sum(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+    rolling_sum = series.rolling(4, min_periods=1).sum()
+    rolling_count = series.rolling(4, min_periods=1).count().replace(0, pd.NA)
+    return rolling_sum * (4.0 / rolling_count)
+
+
 def _average_balance(series: pd.Series) -> pd.Series:
     if series.empty:
         return series
-    return series.rolling(4, min_periods=2).mean()
+    return series.rolling(4, min_periods=1).mean()
 
 
 def _quarter_label(index_value: pd.Timestamp) -> str:
@@ -105,7 +119,7 @@ def _finalize_chart_table(frame: pd.DataFrame, *, percent: bool = False) -> pd.D
     return cleaned.reset_index(drop=True)
 
 
-def build_quarterly_chart_bundle(symbol: str, max_periods: int = 12) -> QuarterlyChartBundle:
+def build_quarterly_chart_bundle(symbol: str, max_periods: int = 20) -> QuarterlyChartBundle:
     symbol = symbol.upper().strip()
     ticker = yf.Ticker(symbol)
     warnings: list[str] = []
@@ -193,16 +207,11 @@ def build_quarterly_chart_bundle(symbol: str, max_periods: int = 12) -> Quarterl
         total_debt = current_debt + long_term_debt
     total_debt = total_debt.fillna(current_debt + long_term_debt)
 
-    revenue_ttm = _ttm(revenue)
-    gross_profit_ttm = _ttm(gross_profit)
-    ebit_ttm = _ttm(ebit)
-    net_income_ttm = _ttm(net_income)
-
-    pretax_income_ttm = _ttm(pretax_income)
-    tax_provision_ttm = _ttm(tax_provision)
-    tax_rate = (tax_provision_ttm / pretax_income_ttm.abs()).clip(lower=0.0, upper=0.35)
+    pretax_income_annualized = _annualized_rolling_sum(pretax_income)
+    tax_provision_annualized = _annualized_rolling_sum(tax_provision)
+    tax_rate = (tax_provision_annualized / pretax_income_annualized.abs()).clip(lower=0.0, upper=0.35)
     tax_rate = tax_rate.fillna(0.21)
-    nopat_ttm = ebit_ttm * (1 - tax_rate)
+    nopat_annualized = _annualized_rolling_sum(ebit) * (1 - tax_rate)
 
     avg_equity = _average_balance(equity)
     avg_assets = _average_balance(total_assets)
@@ -212,10 +221,10 @@ def build_quarterly_chart_bundle(symbol: str, max_periods: int = 12) -> Quarterl
     revenue_profit = _finalize_chart_table(
         pd.DataFrame(
             {
-                "Revenue": revenue_ttm,
-                "Gross Profit": gross_profit_ttm,
-                "EBIT": ebit_ttm,
-                "Net Income": net_income_ttm,
+                "Revenue": revenue,
+                "Gross Profit": gross_profit,
+                "EBIT": ebit,
+                "Net Income": net_income,
             }
         )
     )
@@ -237,9 +246,9 @@ def build_quarterly_chart_bundle(symbol: str, max_periods: int = 12) -> Quarterl
     profitability = _finalize_chart_table(
         pd.DataFrame(
             {
-                "ROIC": nopat_ttm / avg_invested_capital,
-                "ROE": net_income_ttm / avg_equity,
-                "ROA": net_income_ttm / avg_assets,
+                "ROIC": nopat_annualized / avg_invested_capital,
+                "ROE": _annualized_rolling_sum(net_income) / avg_equity,
+                "ROA": _annualized_rolling_sum(net_income) / avg_assets,
             }
         ),
         percent=True,
@@ -248,9 +257,9 @@ def build_quarterly_chart_bundle(symbol: str, max_periods: int = 12) -> Quarterl
     margins = _finalize_chart_table(
         pd.DataFrame(
             {
-                "Gross Profit %": gross_profit_ttm / revenue_ttm,
-                "EBIT Margin %": ebit_ttm / revenue_ttm,
-                "Net Income %": net_income_ttm / revenue_ttm,
+                "Gross Profit %": gross_profit / revenue,
+                "EBIT Margin %": ebit / revenue,
+                "Net Income %": net_income / revenue,
             }
         ),
         percent=True,

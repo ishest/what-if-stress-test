@@ -1788,9 +1788,9 @@ def render_stock_scoring_model(dataset):
 def _quarterly_line_chart(
     frame: pd.DataFrame,
     *,
-    title: str,
     y_title: str,
     dashed_series: set[str] | None = None,
+    percent_axis: bool = False,
 ) -> go.Figure:
     dashed_series = dashed_series or set()
     figure = go.Figure()
@@ -1812,19 +1812,32 @@ def _quarterly_line_chart(
                     "color": palette[idx % len(palette)],
                 },
                 marker={"size": 7},
-                hovertemplate=f"%{{x}}<br>{column}: %{{y:,.2f}}<extra></extra>",
+                hovertemplate=(
+                    f"%{{x}}<br>{column}: %{{y:,.2f}}%<extra></extra>"
+                    if percent_axis
+                    else f"%{{x}}<br>{column}: %{{y:,.2f}}<extra></extra>"
+                ),
             )
         )
 
     figure.update_layout(
-        title=title,
-        margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        margin={"l": 20, "r": 20, "t": 20, "b": 100},
         hovermode="x unified",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.22,
+            "xanchor": "left",
+            "x": 0.0,
+        },
         xaxis_title="Quarter",
         yaxis_title=y_title,
         template="plotly_white",
+        height=430,
     )
+    figure.update_xaxes(tickangle=-35)
+    if percent_axis:
+        figure.update_yaxes(ticksuffix="%")
     return figure
 
 
@@ -1832,7 +1845,8 @@ def render_quarterly_charts(active_ticker: str):
     st.subheader("Charts")
     st.caption(
         "These charts load separately from the main stress-test model. "
-        "Quarterly balance-sheet lines use quarter-end values. Revenue, profit, profitability, and margin charts use trailing four quarters."
+        "Revenue, profit, assets, liabilities, and margins use the maximum available quarterly history from Yahoo Finance. "
+        "ROIC, ROE, and ROA are annualized from the latest available quarterly run-rate so all available quarters remain visible."
     )
 
     request_key = f"quarterly_charts_requested::{active_ticker}"
@@ -1866,55 +1880,61 @@ def render_quarterly_charts(active_ticker: str):
 
     first_row = st.columns(2)
     with first_row[0]:
+        st.markdown("#### #1 Revenue vs Profit")
         if bundle.revenue_profit.empty:
             st.info("Revenue and profit chart is unavailable for this ticker.")
         else:
             st.plotly_chart(
                 _quarterly_line_chart(
                     bundle.revenue_profit,
-                    title="#1 Revenue vs Profit (TTM)",
                     y_title="$mm",
                 ),
                 use_container_width=True,
+                config={"displaylogo": False},
             )
     with first_row[1]:
+        st.markdown("#### #6 Assets and Liabilities")
         if bundle.assets_liabilities.empty:
             st.info("Assets and liabilities chart is unavailable for this ticker.")
         else:
             st.plotly_chart(
                 _quarterly_line_chart(
                     bundle.assets_liabilities,
-                    title="#6 Assets and Liabilities",
                     y_title="$mm",
                     dashed_series={"Total Liabilities", "Current Liabilities", "Non-current Liabilities"},
                 ),
                 use_container_width=True,
+                config={"displaylogo": False},
             )
 
     second_row = st.columns(2)
     with second_row[0]:
+        st.markdown("#### #20 Profitability - ROIC - ROE - ROA")
         if bundle.profitability.empty:
             st.info("Profitability returns chart is unavailable for this ticker.")
         else:
             st.plotly_chart(
                 _quarterly_line_chart(
                     bundle.profitability,
-                    title="#20 Profitability - ROIC - ROE - ROA",
                     y_title="%",
+                    percent_axis=True,
                 ),
                 use_container_width=True,
+                config={"displaylogo": False},
             )
     with second_row[1]:
+        st.markdown("#### #21 Profitability Margins")
         if bundle.margins.empty:
             st.info("Margin chart is unavailable for this ticker.")
         else:
             st.plotly_chart(
                 _quarterly_line_chart(
                     bundle.margins,
-                    title="#21 Profitability Margins",
                     y_title="%",
+                    percent_axis=True,
                 ),
                 use_container_width=True,
+                config={"displaylogo": False},
             )
 
 
