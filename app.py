@@ -1658,6 +1658,218 @@ def render_historical(dataset):
         st.dataframe(source_df, use_container_width=True, hide_index=True)
 
 
+def _build_quarterly_chart_frame(dataset) -> pd.DataFrame:
+    if dataset.quarterly_raw is None or dataset.quarterly_financials is None or dataset.quarterly_financials.empty:
+        return pd.DataFrame()
+
+    quarterly_dates = dataset.quarterly_raw[["Period Label", "asOfDate"]].copy()
+    quarterly_dates["asOfDate"] = pd.to_datetime(quarterly_dates["asOfDate"], errors="coerce")
+
+    quarterly_wide = dataset.quarterly_financials.T.reset_index().rename(columns={"index": "Period Label"})
+    frame = quarterly_dates.merge(quarterly_wide, on="Period Label", how="inner").sort_values("asOfDate").reset_index(drop=True)
+    if frame.empty:
+        return frame
+
+    frame["Quarter Label"] = frame["asOfDate"].dt.strftime("%b %Y")
+    numeric_columns = [column for column in frame.columns if column not in {"Period Label", "Quarter Label", "asOfDate"}]
+    for column in numeric_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    frame["Non-current Assets"] = frame["Total Assets"] - frame["Current Assets"]
+    frame["Non-current Liabilities"] = frame["Total Liabilities"] - frame["Current Liabilities"]
+    frame["Total Debt"] = frame["Short-term Debt"].fillna(0.0) + frame["Long-term Debt"].fillna(0.0)
+    frame["Invested Capital"] = frame["Total Debt"] + frame["Equity"] - frame["Cash & Equivalents"].fillna(0.0)
+
+    def _average_balance(series: pd.Series) -> pd.Series:
+        annual_avg = (series + series.shift(4)) / 2
+        sequential_avg = (series + series.shift(1)) / 2
+        return annual_avg.where(series.shift(4).notna(), sequential_avg)
+
+    revenue = frame["Revenue"].replace(0.0, pd.NA)
+    frame["Gross Margin %"] = frame["Gross Profit"] / revenue
+    frame["EBIT Margin %"] = frame["EBIT"] / revenue
+    frame["Net Margin %"] = frame["Net Income"] / revenue
+
+    net_income_ttm = frame["Net Income"].rolling(4, min_periods=4).sum()
+    ebit_ttm = frame["EBIT"].rolling(4, min_periods=4).sum()
+    pretax_ttm = frame["Pretax Income"].rolling(4, min_periods=4).sum()
+    taxes_ttm = frame["Taxes"].rolling(4, min_periods=4).sum()
+
+    tax_rate = (taxes_ttm / pretax_ttm.replace(0.0, pd.NA)).where(pretax_ttm > 0)
+    tax_rate = tax_rate.clip(lower=0.0, upper=0.35).fillna(0.21)
+    nopat_ttm = ebit_ttm * (1 - tax_rate)
+
+    avg_assets = _average_balance(frame["Total Assets"]).replace(0.0, pd.NA)
+    avg_equity = _average_balance(frame["Equity"]).replace(0.0, pd.NA)
+    avg_invested_capital = _average_balance(frame["Invested Capital"]).replace(0.0, pd.NA)
+
+    frame["ROA TTM %"] = net_income_ttm / avg_assets
+    frame["ROE TTM %"] = net_income_ttm / avg_equity
+    frame["ROIC TTM %"] = nopat_ttm / avg_invested_capital
+    return frame
+
+
+def _build_dark_line_chart(
+    frame: pd.DataFrame,
+    series_specs: list[tuple[str, str, str, str]],
+    title: str,
+    yaxis_title: str,
+    *,
+    percent: bool = False,
+) -> go.Figure:
+    fig = go.Figure()
+
+    for column, label, color, dash in series_specs:
+        if column not in frame.columns:
+            continue
+        series = pd.to_numeric(frame[column], errors="coerce")
+        if series.dropna().empty:
+            continue
+
+        hover_format = "%{y:.1%}" if percent else "%{y:,.1f}"
+        fig.add_trace(
+            go.Scatter(
+                x=frame["asOfDate"],
+                y=series,
+                mode="lines+markers",
+                name=label,
+                line={"color": color, "width": 3, "dash": dash},
+                marker={"size": 7},
+                hovertemplate=f"%{{x|%b %Y}}<br>{label}: {hover_format}<extra></extra>",
+            )
+        )
+
+        last_valid_index = series.last_valid_index()
+        if last_valid_index is not None:
+            value = series.loc[last_valid_index]
+            label_text = f"{value:.0%}" if percent else f"{value:,.0f}"
+            fig.add_trace(
+                go.Scatter(
+                    x=[frame.loc[last_valid_index, "asOfDate"]],
+                    y=[value],
+                    mode="text",
+                    text=[label_text],
+                    textposition="top center",
+                    textfont={"color": "#d6d6d6", "size": 12},
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#222733",
+        plot_bgcolor="#222733",
+        title={"text": title, "x": 0.5, "xanchor": "center"},
+        margin={"l": 20, "r": 20, "t": 60, "b": 50},
+        height=430,
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "top", "y": -0.18, "xanchor": "left", "x": 0.0},
+        yaxis={"title": yaxis_title, "tickformat": ".0%" if percent else ",.0f", "gridcolor": "#3b4151"},
+        xaxis={"title": "", "tickformat": "%b\n%Y", "gridcolor": "#303744"},
+    )
+    return fig
+
+
+def render_charts(dataset):
+    st.subheader("Charts")
+    st.caption(
+        "These charts use Yahoo Finance quarterly (`3M`) statement data. "
+        "Revenue, profit, assets, and liabilities are shown as quarterly values. "
+        "ROIC, ROE, and ROA are shown as trailing-four-quarter ratios at each quarter-end."
+    )
+
+    frame = _build_quarterly_chart_frame(dataset)
+    if frame.empty:
+        st.warning("Yahoo Finance did not return enough quarterly statement data to build the charts for this ticker.")
+        return
+
+    if dataset.quarterly_warnings:
+        with st.expander("Quarterly data notes", expanded=False):
+            for warning in dataset.quarterly_warnings:
+                st.write(f"- {warning}")
+
+    revenue_specs = [
+        ("Revenue", "Revenue", "#2f7ed8", "solid"),
+        ("Gross Profit", "Gross Profit", "#00d2d3", "solid"),
+        ("EBIT", "EBIT", "#f5a25d", "solid"),
+        ("Net Income", "Net Profit", "#2ecc71", "solid"),
+    ]
+    balance_specs = [
+        ("Total Assets", "Total Assets", "#21ff3f", "solid"),
+        ("Cash & Equivalents", "Cash", "#00d16a", "solid"),
+        ("Current Assets", "Current assets", "#8fd35a", "solid"),
+        ("Non-current Assets", "Non-current assets", "#567d1f", "solid"),
+        ("Total Liabilities", "Total Liabilities", "#ff3b30", "dash"),
+        ("Current Liabilities", "Current Liabilities", "#ff7b5a", "dash"),
+        ("Non-current Liabilities", "Non-current Liabilities", "#ffb0a8", "dash"),
+    ]
+    returns_specs = [
+        ("ROIC TTM %", "Return on Invested Capital", "#7f1d8d", "solid"),
+        ("ROE TTM %", "Return on Equity", "#6d28d9", "solid"),
+        ("ROA TTM %", "Return on Assets", "#c4a1ff", "solid"),
+    ]
+    margin_specs = [
+        ("Gross Margin %", "Gross profit %", "#00c2b2", "solid"),
+        ("EBIT Margin %", "EBIT Margin %", "#00a676", "solid"),
+        ("Net Margin %", "Net income %", "#22c55e", "solid"),
+    ]
+
+    top_left, top_right = st.columns(2)
+    with top_left:
+        st.plotly_chart(
+            _build_dark_line_chart(frame, revenue_specs, "#1 Revenue vs Profit", "Statement value ($mm)"),
+            use_container_width=True,
+        )
+    with top_right:
+        st.plotly_chart(
+            _build_dark_line_chart(frame, balance_specs, "#6 Assets and Liabilities", "Balance sheet value ($mm)"),
+            use_container_width=True,
+        )
+
+    bottom_left, bottom_right = st.columns(2)
+    with bottom_left:
+        st.plotly_chart(
+            _build_dark_line_chart(frame, returns_specs, "#20 Profitability - ROIC - ROE - ROA", "TTM return", percent=True),
+            use_container_width=True,
+        )
+    with bottom_right:
+        st.plotly_chart(
+            _build_dark_line_chart(frame, margin_specs, "#21 Profitability Margins", "Quarterly margin", percent=True),
+            use_container_width=True,
+        )
+
+    with st.expander("Quarterly data used in charts", expanded=False):
+        display_columns = [
+            "Quarter Label",
+            "Revenue",
+            "Gross Profit",
+            "EBIT",
+            "Net Income",
+            "Cash & Equivalents",
+            "Current Assets",
+            "Current Liabilities",
+            "Total Assets",
+            "Total Liabilities",
+            "Gross Margin %",
+            "EBIT Margin %",
+            "Net Margin %",
+            "ROIC TTM %",
+            "ROE TTM %",
+            "ROA TTM %",
+        ]
+        available_columns = [column for column in display_columns if column in frame.columns]
+        display_frame = frame[available_columns].copy()
+        for column in display_frame.columns:
+            if column == "Quarter Label":
+                continue
+            if column.endswith("%"):
+                display_frame[column] = display_frame[column].map(format_pct)
+            else:
+                display_frame[column] = display_frame[column].map(format_m)
+        st.dataframe(display_frame, use_container_width=True, hide_index=True)
+
+
 def render_ratio_scorecard(dataset):
     st.subheader("Financial Ratio Scorecard")
     st.caption(
@@ -2246,6 +2458,7 @@ def main():
             "Financial Ratios",
             "Multiples",
             "Scoring Model",
+            "Charts",
             "Historicals",
             "Scenario Matrix",
             "Sequence Map",
@@ -2274,15 +2487,17 @@ def main():
     with tabs[5]:
         render_stock_scoring_model(dataset)
     with tabs[6]:
-        render_historical(dataset)
+        render_charts(dataset)
     with tabs[7]:
+        render_historical(dataset)
+    with tabs[8]:
         if scenario_matrix is None:
             render_stress_unavailable(stress_error)
         else:
             render_scenario_matrix(dataset, scenario_matrix)
-    with tabs[8]:
-        render_sequence_library(sequence_map)
     with tabs[9]:
+        render_sequence_library(sequence_map)
+    with tabs[10]:
         render_faq()
 
 

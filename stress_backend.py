@@ -35,14 +35,18 @@ HISTORICAL_LINE_ITEMS = [
     "Accounts Receivable",
     "Inventory",
     "Other Current Assets",
+    "Current Assets",
     "PP&E, net",
     "Intangibles & Goodwill",
     "Other Non-current Assets",
+    "Total Assets",
     "Short-term Debt",
     "Accounts Payable",
     "Other Current Liabilities",
+    "Current Liabilities",
     "Long-term Debt",
     "Other Non-current Liabilities",
+    "Total Liabilities",
     "Equity",
     "Balance Check",
     "Capex",
@@ -152,6 +156,10 @@ class HistoricalDataset:
     warnings: list[str]
     data_quality_score: float
     sector_warning: str | None
+    quarterly_raw: pd.DataFrame | None = None
+    quarterly_financials: pd.DataFrame | None = None
+    quarterly_sources: pd.DataFrame | None = None
+    quarterly_warnings: list[str] | None = None
 
 
 class StressModelDataError(ValueError):
@@ -684,6 +692,39 @@ def fetch_annual_financials(symbol: str) -> pd.DataFrame:
     raise ValueError(f"Yahoo Finance annual statement retrieval failed for ticker '{symbol}'.")
 
 
+def fetch_quarterly_financials(symbol: str) -> pd.DataFrame:
+    last_error: Exception | None = None
+
+    for _ in _yahoo_attempts():
+        try:
+            ticker = Ticker(symbol, asynchronous=False)
+            frame = ticker.all_financial_data(frequency="q")
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                raise ValueError(f"No quarterly financial statement data returned by Yahoo Finance for ticker '{symbol}'.")
+
+            quarterly = frame.reset_index().copy()
+            if "asOfDate" not in quarterly.columns:
+                raise ValueError(f"Yahoo Finance did not return quarterly statement dates for ticker '{symbol}'.")
+
+            quarterly["asOfDate"] = pd.to_datetime(quarterly["asOfDate"], errors="coerce")
+            quarterly = quarterly.dropna(subset=["asOfDate"])
+            if "periodType" in quarterly.columns:
+                quarterly = quarterly[quarterly["periodType"].astype(str).str.upper() == "3M"]
+            quarterly = quarterly.sort_values("asOfDate")
+            if quarterly.empty:
+                raise ValueError(f"Yahoo Finance did not return usable 3M quarterly statements for ticker '{symbol}'.")
+
+            quarterly["Period Label"] = quarterly["asOfDate"].dt.strftime("%Y-%m-%d")
+            latest_periods = quarterly.tail(min(12, len(quarterly))).copy().reset_index(drop=True)
+            return latest_periods
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"Yahoo Finance quarterly statement retrieval failed for ticker '{symbol}'.")
+
+
 def _map_single_year(row: pd.Series) -> tuple[dict[str, float | None], dict[str, str], list[str]]:
     warnings: list[str] = []
     values: dict[str, float | None] = {}
@@ -1001,17 +1042,17 @@ def _map_single_year(row: pd.Series) -> tuple[dict[str, float | None], dict[str,
     return values, sources, warnings
 
 
-def map_historical_financials(annual_data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def map_historical_financials(period_data: pd.DataFrame, label_column: str = "Fiscal Year") -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     year_values: dict[str, dict[str, float | None]] = {}
     year_sources: dict[str, dict[str, str]] = {}
     warnings: list[str] = []
 
-    for _, row in annual_data.iterrows():
-        fiscal_year = str(row["Fiscal Year"])
+    for _, row in period_data.iterrows():
+        period_label = str(row[label_column])
         mapped_values, mapped_sources, row_warnings = _map_single_year(row)
-        warnings.extend([f"{fiscal_year}: {warning}" for warning in row_warnings])
-        year_values[fiscal_year] = mapped_values
-        year_sources[fiscal_year] = mapped_sources
+        warnings.extend([f"{period_label}: {warning}" for warning in row_warnings])
+        year_values[period_label] = mapped_values
+        year_sources[period_label] = mapped_sources
 
     financials = pd.DataFrame(year_values).reindex(HISTORICAL_LINE_ITEMS)
     sources = pd.DataFrame(year_sources).reindex(HISTORICAL_LINE_ITEMS)
@@ -1264,6 +1305,19 @@ def build_historical_dataset(symbol: str) -> HistoricalDataset:
     annual_raw = fetch_annual_financials(symbol)
     overview = fetch_company_overview(symbol)
     financials, sources, warnings = map_historical_financials(annual_raw)
+    quarterly_raw = None
+    quarterly_financials = None
+    quarterly_sources = None
+    quarterly_warnings: list[str] = []
+    try:
+        quarterly_raw = fetch_quarterly_financials(symbol)
+        quarterly_financials, quarterly_sources, quarterly_warnings = map_historical_financials(
+            quarterly_raw,
+            label_column="Period Label",
+        )
+    except Exception as exc:
+        quarterly_warnings.append(str(exc))
+
     latest_year = str(financials.columns[-1])
     latest_values = _build_latest_values(financials)
     data_quality_score, blockers = _compute_data_quality(financials)
@@ -1287,6 +1341,10 @@ def build_historical_dataset(symbol: str) -> HistoricalDataset:
         warnings=sorted(set(warnings)),
         data_quality_score=data_quality_score,
         sector_warning=sector_warning,
+        quarterly_raw=quarterly_raw,
+        quarterly_financials=quarterly_financials,
+        quarterly_sources=quarterly_sources,
+        quarterly_warnings=sorted(set(quarterly_warnings)),
     )
 
 
