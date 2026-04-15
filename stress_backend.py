@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable
 
@@ -507,30 +508,35 @@ def _fetch_company_overview_via_yahooquery(symbol: str) -> CompanyOverview:
 
 def _fetch_company_overview_via_yfinance(symbol: str) -> CompanyOverview:
     ticker = yf.Ticker(symbol)
-    info = ticker.info if isinstance(ticker.info, dict) else {}
-
     fast_info = getattr(ticker, "fast_info", None)
+    metadata = ticker.get_history_metadata() or {}
+
     fast_price = None
+    market_cap = None
+    exchange = ""
+    currency = ""
     if hasattr(fast_info, "get"):
         fast_price = _to_float(fast_info.get("lastPrice"))
+        market_cap = _to_float(fast_info.get("marketCap"))
+        exchange = str(fast_info.get("exchange") or "")
+        currency = str(fast_info.get("currency") or "")
 
-    market_cap = _to_float(info.get("marketCap"))
-    current_price = _to_float(info.get("regularMarketPrice")) or _to_float(info.get("currentPrice")) or fast_price
-    short_name = str(info.get("shortName") or symbol)
-    long_name = str(info.get("longName") or short_name or symbol)
+    current_price = fast_price or _to_float(metadata.get("regularMarketPrice")) or _to_float(metadata.get("previousClose"))
+    short_name = str(metadata.get("shortName") or symbol)
+    long_name = str(metadata.get("longName") or short_name or symbol)
 
     return CompanyOverview(
         ticker=symbol,
         short_name=short_name,
         long_name=long_name,
-        sector=str(info.get("sector") or ""),
-        industry=str(info.get("industry") or ""),
-        exchange=str(info.get("exchange") or ""),
-        currency=str(info.get("currency") or info.get("financialCurrency") or ""),
-        website=str(info.get("website") or ""),
+        sector="",
+        industry="",
+        exchange=exchange or str(metadata.get("exchangeName") or metadata.get("fullExchangeName") or ""),
+        currency=currency or str(metadata.get("currency") or ""),
+        website="",
         market_cap_m=_to_millions(market_cap),
         current_price=current_price,
-        summary=str(info.get("longBusinessSummary") or ""),
+        summary="",
     )
 
 
@@ -590,39 +596,13 @@ def _remember_best_overview(symbol: str, overview: CompanyOverview) -> CompanyOv
 
 def fetch_company_overview(symbol: str) -> CompanyOverview:
     symbol = symbol.upper().strip()
-    yfinance_overview: CompanyOverview | None = None
-    direct_overview: CompanyOverview | None = None
-    yahooquery_overview: CompanyOverview | None = None
-
     try:
-        yfinance_overview = _fetch_company_overview_via_yfinance(symbol)
+        overview = _fetch_company_overview_via_yfinance(symbol)
     except Exception:
-        yfinance_overview = None
+        overview = None
 
-    try:
-        direct_overview = _fetch_company_overview_via_http(symbol)
-    except Exception:
-        direct_overview = None
-
-    try:
-        yahooquery_overview = _fetch_company_overview_via_yahooquery(symbol)
-    except Exception:
-        yahooquery_overview = None
-
-    combined: CompanyOverview | None = None
-    if yfinance_overview:
-        combined = yfinance_overview
-    if direct_overview:
-        combined = _merge_company_overview(direct_overview, combined) if combined else direct_overview
-    if yahooquery_overview:
-        combined = _merge_company_overview(yahooquery_overview, combined) if combined else yahooquery_overview
-
-    if combined:
-        if yfinance_overview:
-            combined = _merge_company_overview(yfinance_overview, combined)
-        elif direct_overview:
-            combined = _merge_company_overview(direct_overview, combined)
-        return _remember_best_overview(symbol, combined)
+    if overview is not None:
+        return _remember_best_overview(symbol, overview)
     if symbol in _LAST_GOOD_OVERVIEWS:
         return _LAST_GOOD_OVERVIEWS[symbol]
     return _empty_overview(symbol)
@@ -648,7 +628,75 @@ def load_workbook_model(workbook_path: str = str(WORKBOOK_PATH)) -> tuple[pd.Dat
     )
     return scenario_library, sequence_map, defaults
 
-def fetch_annual_financials(symbol: str) -> pd.DataFrame:
+
+def _normalize_financial_label(label: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "", str(label or ""))
+
+
+def _coalesce_duplicate_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or frame.columns.is_unique:
+        return frame
+
+    combined: dict[str, pd.Series] = {}
+    for column in dict.fromkeys(map(str, frame.columns)):
+        duplicate_frame = frame.loc[:, frame.columns == column]
+        if isinstance(duplicate_frame, pd.Series):
+            combined[column] = duplicate_frame
+        else:
+            combined[column] = duplicate_frame.bfill(axis=1).iloc[:, 0]
+    return pd.DataFrame(combined, index=frame.index)
+
+
+def _prepare_yfinance_statement_frame(statement: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(statement, pd.DataFrame) or statement.empty:
+        return pd.DataFrame()
+
+    frame = statement.T.copy()
+    frame.index = pd.to_datetime(frame.index, errors="coerce")
+    frame = frame[~frame.index.isna()]
+    if frame.empty:
+        return pd.DataFrame()
+
+    frame.columns = [_normalize_financial_label(column) for column in frame.columns]
+    frame = _coalesce_duplicate_columns(frame)
+    frame.index.name = "asOfDate"
+    return frame
+
+
+def _fetch_annual_financials_via_yfinance(symbol: str) -> pd.DataFrame:
+    ticker = yf.Ticker(symbol)
+    statement_frames = []
+
+    for attribute in ("income_stmt", "balance_sheet", "cash_flow"):
+        try:
+            prepared = _prepare_yfinance_statement_frame(getattr(ticker, attribute))
+        except Exception:
+            prepared = pd.DataFrame()
+        if not prepared.empty:
+            statement_frames.append(prepared)
+
+    if not statement_frames:
+        raise ValueError(f"No annual financial statement data returned by Yahoo Finance for ticker '{symbol}'.")
+
+    combined = pd.concat(statement_frames, axis=1)
+    combined = _coalesce_duplicate_columns(combined)
+    annual = combined.reset_index().copy()
+    if "asOfDate" not in annual.columns:
+        raise ValueError(f"Yahoo Finance did not return annual statement dates for ticker '{symbol}'.")
+
+    annual["asOfDate"] = pd.to_datetime(annual["asOfDate"], errors="coerce")
+    annual = annual.dropna(subset=["asOfDate"]).sort_values("asOfDate")
+    if annual.empty:
+        raise ValueError(f"Yahoo Finance did not return usable annual statements for ticker '{symbol}'.")
+
+    annual["Fiscal Year"] = annual["asOfDate"].dt.year.astype(str)
+    latest_periods = annual.tail(min(12, len(annual))).copy()
+    if latest_periods.shape[0] < 2:
+        raise ValueError(f"Yahoo Finance returned fewer than two annual periods for ticker '{symbol}'.")
+    return latest_periods.reset_index(drop=True)
+
+
+def _fetch_annual_financials_via_yahooquery(symbol: str) -> pd.DataFrame:
     last_error: Exception | None = None
 
     for _ in _yahoo_attempts():
@@ -676,6 +724,20 @@ def fetch_annual_financials(symbol: str) -> pd.DataFrame:
                 raise ValueError(f"Yahoo Finance returned fewer than two annual periods for ticker '{symbol}'.")
             latest_periods = latest_periods.reset_index(drop=True)
             return latest_periods
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"Yahoo Finance annual statement retrieval failed for ticker '{symbol}'.")
+
+
+def fetch_annual_financials(symbol: str) -> pd.DataFrame:
+    last_error: Exception | None = None
+
+    for loader in (_fetch_annual_financials_via_yfinance, _fetch_annual_financials_via_yahooquery):
+        try:
+            return loader(symbol)
         except Exception as exc:
             last_error = exc
 

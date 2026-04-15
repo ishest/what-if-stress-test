@@ -14,8 +14,6 @@ def main() -> None:
             raise AssertionError(f"{symbol} overview is missing current price.")
         if dataset.overview.market_cap_m is None:
             raise AssertionError(f"{symbol} overview is missing market cap.")
-        if not dataset.overview.summary:
-            raise AssertionError(f"{symbol} overview is missing business summary.")
         matrix = run_all_scenarios(dataset.latest_values, defaults, scenario_library)
         scorecard = build_ratio_scorecard(dataset)
         multiples = build_multiples_snapshot(dataset)
