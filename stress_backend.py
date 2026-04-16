@@ -663,11 +663,24 @@ def fetch_company_overview(symbol: str) -> CompanyOverview:
     except Exception:
         profile_overview = None
 
+    http_overview: CompanyOverview | None = None
+
     combined = overview or _empty_overview(symbol)
     if search_overview is not None:
         combined = _merge_company_overview(search_overview, combined)
     if profile_overview is not None:
         combined = _merge_company_overview(profile_overview, combined)
+
+    # On some deployments the lightweight overview paths provide price/market cap
+    # but not the long business summary. Use Yahoo's direct quoteSummary HTTP
+    # endpoint only when the richer profile fields are still missing.
+    if not (combined.summary or "").strip() or not combined.sector or not combined.industry or not combined.website:
+        try:
+            http_overview = _fetch_company_overview_via_http(symbol)
+        except Exception:
+            http_overview = None
+        if http_overview is not None:
+            combined = _merge_company_overview(http_overview, combined)
 
     if combined is not None:
         return _remember_best_overview(symbol, combined)
