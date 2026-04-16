@@ -567,26 +567,39 @@ def _fetch_company_overview_via_yfinance(symbol: str) -> CompanyOverview:
 
 
 def _fetch_company_profile_enrichment(symbol: str) -> CompanyOverview:
-    ticker = Ticker(symbol, asynchronous=False)
+    asset_profile: dict[str, Any] = {}
+    summary_profile: dict[str, Any] = {}
 
-    try:
-        asset_profile_response = ticker.asset_profile
-    except Exception:
-        asset_profile_response = {}
+    for _ in _yahoo_attempts():
+        ticker = Ticker(symbol, asynchronous=False)
+        try:
+            asset_profile_response = ticker.asset_profile
+            asset_profile = _symbol_payload(asset_profile_response, symbol)
+        except Exception:
+            asset_profile = {}
 
-    asset_profile = _symbol_payload(asset_profile_response, symbol)
+        try:
+            summary_profile_response = ticker.summary_profile
+            summary_profile = _symbol_payload(summary_profile_response, symbol)
+        except Exception:
+            summary_profile = {}
+
+        if asset_profile or summary_profile:
+            break
+
+    profile = summary_profile or asset_profile
     return CompanyOverview(
         ticker=symbol,
         short_name=symbol,
         long_name=symbol,
-        sector=str(asset_profile.get("sector") or ""),
-        industry=str(asset_profile.get("industry") or ""),
+        sector=str(profile.get("sector") or asset_profile.get("sector") or ""),
+        industry=str(profile.get("industry") or asset_profile.get("industry") or ""),
         exchange="",
         currency="",
-        website=str(asset_profile.get("website") or ""),
+        website=str(profile.get("website") or asset_profile.get("website") or ""),
         market_cap_m=None,
         current_price=None,
-        summary=str(asset_profile.get("longBusinessSummary") or ""),
+        summary=str(profile.get("longBusinessSummary") or asset_profile.get("longBusinessSummary") or ""),
     )
 
 
