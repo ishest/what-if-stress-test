@@ -79,6 +79,7 @@ THRESHOLD_WIDGET_KEYS = {
     "maximum_net_leverage": "threshold_maximum_net_leverage",
     "minimum_current_ratio": "threshold_minimum_current_ratio",
 }
+COMPANY_LOAD_CACHE_VERSION = "2026-04-16-company-overview-refresh-1"
 
 
 def _status_from_score(score: float | int | None) -> str:
@@ -980,7 +981,8 @@ def load_model():
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def load_company(symbol: str):
+def load_company(symbol: str, cache_version: str = COMPANY_LOAD_CACHE_VERSION):
+    _ = cache_version
     return build_historical_dataset(symbol.upper().strip())
 
 
@@ -1049,6 +1051,16 @@ def _repair_dataset_overview(dataset, active_ticker: str):
             fresh_overview = None
         else:
             best_overview = _merge_overviews(fresh_overview, best_overview, active_ticker)
+
+    # If the description is still missing, rebuild just this company's dataset once.
+    # This busts stale cached overview payloads without changing the rest of the app flow.
+    if not (best_overview.summary or "").strip():
+        try:
+            rebuilt_dataset = build_historical_dataset(active_ticker)
+        except Exception:
+            rebuilt_dataset = None
+        else:
+            best_overview = _merge_overviews(rebuilt_dataset.overview, best_overview, active_ticker)
 
     if best_overview is not None:
         previous_best = session_overviews.get(active_ticker)
@@ -2396,7 +2408,7 @@ def main():
 
     try:
         with st.spinner(f"Loading live Yahoo Finance data for {active_ticker}..."):
-            dataset = load_company(active_ticker)
+            dataset = load_company(active_ticker, COMPANY_LOAD_CACHE_VERSION)
     except Exception as exc:
         st.title("What If Stress Test Web App")
         st.error(f"Could not load Yahoo Finance data for `{active_ticker}`.")
