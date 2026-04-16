@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from financial_ratios import build_ratio_scorecard
 from multiples import build_multiples_snapshot
-from quarterly_charts import build_quarterly_chart_bundle
+from quarterly_charts import build_annual_chart_bundle, build_quarterly_chart_bundle
 from stock_scoring import build_stock_scoring_model
 from stress_backend import StressModelDataError, build_historical_dataset, load_workbook_model, run_all_scenarios
 
@@ -31,6 +31,11 @@ def main() -> None:
     if quarterly_bundle.revenue_profit.empty and quarterly_bundle.assets_liabilities.empty:
         raise AssertionError("Quarterly charts are empty for AAPL.")
     print("AAPL", "quarterly charts", len(quarterly_bundle.revenue_profit), len(quarterly_bundle.assets_liabilities))
+
+    annual_bundle = build_annual_chart_bundle("AAPL", build_historical_dataset("AAPL").annual_raw)
+    if annual_bundle.revenue_profit.empty and annual_bundle.assets_liabilities.empty:
+        raise AssertionError("Annual charts are empty for AAPL.")
+    print("AAPL", "annual charts", len(annual_bundle.revenue_profit), len(annual_bundle.assets_liabilities))
 
     for symbol in ["P911.DE", "CHA"]:
         dataset = build_historical_dataset(symbol)

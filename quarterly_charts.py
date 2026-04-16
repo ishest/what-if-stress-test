@@ -21,6 +21,16 @@ class QuarterlyChartBundle:
     warnings: list[str]
 
 
+@dataclass
+class AnnualChartBundle:
+    symbol: str
+    revenue_profit: pd.DataFrame
+    assets_liabilities: pd.DataFrame
+    profitability: pd.DataFrame
+    margins: pd.DataFrame
+    warnings: list[str]
+
+
 def _normalize_label(label: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "", str(label or ""))
 
@@ -89,10 +99,10 @@ def _annualized_rolling_sum(series: pd.Series) -> pd.Series:
     return rolling_sum * (4.0 / rolling_count)
 
 
-def _average_balance(series: pd.Series) -> pd.Series:
+def _average_balance(series: pd.Series, *, window: int = 4) -> pd.Series:
     if series.empty:
         return series
-    return series.rolling(4, min_periods=1).mean()
+    return series.rolling(window, min_periods=1).mean()
 
 
 def _quarter_label(index_value: pd.Timestamp) -> str:
@@ -100,7 +110,17 @@ def _quarter_label(index_value: pd.Timestamp) -> str:
     return f"{quarter.year}-Q{quarter.quarter}"
 
 
-def _finalize_chart_table(frame: pd.DataFrame, *, percent: bool = False) -> pd.DataFrame:
+def _year_label(index_value: pd.Timestamp) -> str:
+    return str(index_value.year)
+
+
+def _finalize_chart_table(
+    frame: pd.DataFrame,
+    *,
+    percent: bool = False,
+    label_name: str = "Quarter",
+    label_builder=_quarter_label,
+) -> pd.DataFrame:
     if frame.empty:
         return frame
 
@@ -115,8 +135,23 @@ def _finalize_chart_table(frame: pd.DataFrame, *, percent: bool = False) -> pd.D
         cleaned = cleaned / MILLION
 
     cleaned = cleaned.replace([pd.NA, pd.NaT], None)
-    cleaned.insert(0, "Quarter", [_quarter_label(value) for value in cleaned.index])
+    cleaned.insert(0, label_name, [label_builder(value) for value in cleaned.index])
     return cleaned.reset_index(drop=True)
+
+
+def _prepare_annual_raw_frame(annual_raw: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(annual_raw, pd.DataFrame) or annual_raw.empty:
+        return pd.DataFrame()
+
+    frame = annual_raw.copy()
+    if "asOfDate" not in frame.columns:
+        return pd.DataFrame()
+
+    frame["asOfDate"] = pd.to_datetime(frame["asOfDate"], errors="coerce")
+    frame = frame.dropna(subset=["asOfDate"]).sort_values("asOfDate").set_index("asOfDate")
+    frame.columns = [_normalize_label(column) for column in frame.columns]
+    frame = _coalesce_duplicate_columns(frame)
+    return frame
 
 
 def build_quarterly_chart_bundle(symbol: str, max_periods: int = 20) -> QuarterlyChartBundle:
@@ -269,6 +304,153 @@ def build_quarterly_chart_bundle(symbol: str, max_periods: int = 20) -> Quarterl
         raise ValueError(f"Yahoo Finance quarterly statements for '{symbol}' did not contain enough data to chart.")
 
     return QuarterlyChartBundle(
+        symbol=symbol,
+        revenue_profit=revenue_profit,
+        assets_liabilities=assets_liabilities,
+        profitability=profitability,
+        margins=margins,
+        warnings=warnings,
+    )
+
+
+def build_annual_chart_bundle(symbol: str, annual_raw: pd.DataFrame, max_periods: int = 12) -> AnnualChartBundle:
+    symbol = symbol.upper().strip()
+    warnings: list[str] = []
+    combined = _prepare_annual_raw_frame(annual_raw)
+
+    if combined.empty:
+        raise ValueError(f"Annual statement history is unavailable for ticker '{symbol}'.")
+
+    if max_periods > 0:
+        combined = combined.tail(max_periods)
+
+    revenue = _get_statement_series(combined, ["TotalRevenue", "OperatingRevenue"])
+    gross_profit = _get_statement_series(combined, ["GrossProfit"])
+    cogs = _get_statement_series(combined, ["CostOfRevenue", "ReconciledCostOfRevenue"]).abs()
+    ebit = _get_statement_series(combined, ["EBIT", "TotalOperatingIncomeAsReported"])
+    pretax_income = _get_statement_series(combined, ["PretaxIncome"])
+    tax_provision = _get_statement_series(combined, ["TaxProvision"]).abs()
+    net_income = _get_statement_series(
+        combined,
+        [
+            "NetIncome",
+            "NetIncomeCommonStockholders",
+            "NetIncomeFromContinuingOperationNetMinorityInterest",
+        ],
+    )
+
+    if gross_profit.isna().all() and not revenue.isna().all() and not cogs.isna().all():
+        gross_profit = revenue - cogs
+
+    cash = _get_statement_series(
+        combined,
+        ["CashAndCashEquivalents", "CashCashEquivalentsAndShortTermInvestments", "EndCashPosition"],
+    )
+    receivables = _get_statement_series(combined, ["AccountsReceivable"])
+    inventory = _get_statement_series(combined, ["Inventory"]).fillna(0.0)
+    other_current_assets = _get_statement_series(combined, ["OtherCurrentAssets"]).fillna(0.0)
+    current_assets = _get_statement_series(combined, ["CurrentAssets"])
+    total_assets = _get_statement_series(combined, ["TotalAssets"])
+
+    current_debt = _get_statement_series(
+        combined,
+        ["CurrentDebt", "CurrentDebtAndCapitalLeaseObligation", "OtherCurrentBorrowings"],
+    ).fillna(0.0)
+    accounts_payable = _get_statement_series(combined, ["AccountsPayable", "Payables"]).fillna(0.0)
+    other_current_liabilities = _get_statement_series(combined, ["OtherCurrentLiabilities"]).fillna(0.0)
+    current_liabilities = _get_statement_series(combined, ["CurrentLiabilities"])
+    long_term_debt = _get_statement_series(
+        combined,
+        ["LongTermDebt", "LongTermDebtAndCapitalLeaseObligation"],
+    ).fillna(0.0)
+    total_debt = _get_statement_series(combined, ["TotalDebt"])
+    total_liabilities = _get_statement_series(combined, ["TotalLiabilitiesNetMinorityInterest", "TotalLiabilities"])
+    equity = _get_statement_series(
+        combined,
+        ["CommonStockEquity", "StockholdersEquity", "TotalEquityGrossMinorityInterest"],
+    )
+
+    if current_assets.isna().all():
+        current_assets = cash.fillna(0.0) + receivables.fillna(0.0) + inventory + other_current_assets
+    if current_liabilities.isna().all():
+        current_liabilities = current_debt + accounts_payable + other_current_liabilities
+    if total_liabilities.isna().all() and not total_assets.isna().all() and not equity.isna().all():
+        total_liabilities = total_assets - equity
+
+    non_current_assets = total_assets - current_assets
+    non_current_liabilities = total_liabilities - current_liabilities
+
+    if total_debt.isna().all():
+        total_debt = current_debt + long_term_debt
+    total_debt = total_debt.fillna(current_debt + long_term_debt)
+
+    tax_rate = (tax_provision / pretax_income.abs()).clip(lower=0.0, upper=0.35).fillna(0.21)
+    nopat = ebit * (1 - tax_rate)
+
+    avg_equity = _average_balance(equity, window=2)
+    avg_assets = _average_balance(total_assets, window=2)
+    invested_capital = equity + total_debt - cash.fillna(0.0)
+    avg_invested_capital = _average_balance(invested_capital, window=2)
+
+    revenue_profit = _finalize_chart_table(
+        pd.DataFrame(
+            {
+                "Revenue": revenue,
+                "Gross Profit": gross_profit,
+                "EBIT": ebit,
+                "Net Income": net_income,
+            }
+        ),
+        label_name="Year",
+        label_builder=_year_label,
+    )
+
+    assets_liabilities = _finalize_chart_table(
+        pd.DataFrame(
+            {
+                "Total Assets": total_assets,
+                "Cash": cash,
+                "Current Assets": current_assets,
+                "Non-current Assets": non_current_assets,
+                "Total Liabilities": total_liabilities,
+                "Current Liabilities": current_liabilities,
+                "Non-current Liabilities": non_current_liabilities,
+            }
+        ),
+        label_name="Year",
+        label_builder=_year_label,
+    )
+
+    profitability = _finalize_chart_table(
+        pd.DataFrame(
+            {
+                "ROIC": nopat / avg_invested_capital,
+                "ROE": net_income / avg_equity,
+                "ROA": net_income / avg_assets,
+            }
+        ),
+        percent=True,
+        label_name="Year",
+        label_builder=_year_label,
+    )
+
+    margins = _finalize_chart_table(
+        pd.DataFrame(
+            {
+                "Gross Profit %": gross_profit / revenue,
+                "EBIT Margin %": ebit / revenue,
+                "Net Income %": net_income / revenue,
+            }
+        ),
+        percent=True,
+        label_name="Year",
+        label_builder=_year_label,
+    )
+
+    if revenue_profit.empty and assets_liabilities.empty and profitability.empty and margins.empty:
+        raise ValueError(f"Annual statements for '{symbol}' did not contain enough data to chart.")
+
+    return AnnualChartBundle(
         symbol=symbol,
         revenue_profit=revenue_profit,
         assets_liabilities=assets_liabilities,

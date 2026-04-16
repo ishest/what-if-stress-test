@@ -2458,7 +2458,7 @@ def main():
     with tabs[5]:
         render_stock_scoring_model(dataset)
     with tabs[6]:
-        render_quarterly_charts(active_ticker)
+        render_quarterly_charts(dataset, active_ticker)
     with tabs[7]:
         render_historical(dataset)
     with tabs[8]:
