@@ -17,6 +17,8 @@ def main() -> None:
             raise AssertionError(f"{symbol} overview is missing market cap.")
         matrix = run_all_scenarios(dataset.latest_values, defaults, scenario_library)
         scorecard = build_ratio_scorecard(dataset)
+        if "Market multiples" not in scorecard.category_tables:
+            raise AssertionError(f"{symbol} ratio scorecard is missing the Market multiples category.")
         multiples = build_multiples_snapshot(dataset)
         scoring_model = build_stock_scoring_model(dataset)
         counts = matrix["Rating"].value_counts().to_dict()

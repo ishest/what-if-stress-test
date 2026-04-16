@@ -9,7 +9,7 @@ import pandas as pd
 
 
 MILLION = 1_000_000.0
-CATEGORY_ORDER = ["Total score", "Profitability", "Liquidity", "Credit risk", "Activity"]
+CATEGORY_ORDER = ["Total score", "Profitability", "Liquidity", "Credit risk", "Activity", "Market multiples"]
 
 
 @dataclass
@@ -226,6 +226,60 @@ RATIO_DEFINITIONS = [
         "format": "number",
         "formula": "Total assets / equity",
     },
+    {
+        "category": "Market multiples",
+        "label": "P/E",
+        "mark": "<= 25x",
+        "kind": "threshold_max",
+        "target": 25.0,
+        "format": "number",
+        "formula": "Market cap / net income",
+    },
+    {
+        "category": "Market multiples",
+        "label": "P/S",
+        "mark": "<= 6x",
+        "kind": "threshold_max",
+        "target": 6.0,
+        "format": "number",
+        "formula": "Market cap / revenue",
+    },
+    {
+        "category": "Market multiples",
+        "label": "P/Cash Flow",
+        "mark": "<= 20x",
+        "kind": "threshold_max",
+        "target": 20.0,
+        "format": "number",
+        "formula": "Market cap / CFO",
+    },
+    {
+        "category": "Market multiples",
+        "label": "Price / Book",
+        "mark": "<= 5x",
+        "kind": "threshold_max",
+        "target": 5.0,
+        "format": "number",
+        "formula": "Market cap / equity",
+    },
+    {
+        "category": "Market multiples",
+        "label": "Enterprise Value / EBITDA",
+        "mark": "<= 15x",
+        "kind": "threshold_max",
+        "target": 15.0,
+        "format": "number",
+        "formula": "Enterprise value / EBITDA",
+    },
+    {
+        "category": "Market multiples",
+        "label": "Enterprise Value / Sales",
+        "mark": "<= 6x",
+        "kind": "threshold_max",
+        "target": 6.0,
+        "format": "number",
+        "formula": "Enterprise value / revenue",
+    },
 ]
 
 
@@ -353,6 +407,25 @@ def _score_range(value: float | None, low: float, high: float) -> int | None:
     return 1
 
 
+def _score_threshold_max(value: float | None, target: float) -> int | None:
+    if value is None or pd.isna(value):
+        return None
+    if value <= 0:
+        return 0
+    ratio = value / target if target > 0 else 1.0
+    if ratio <= 0.50:
+        return 5
+    if ratio <= 0.75:
+        return 4
+    if ratio <= 1.00:
+        return 3
+    if ratio <= 1.50:
+        return 2
+    if ratio <= 2.00:
+        return 1
+    return 0
+
+
 def _score_series(series: pd.Series, kind: str, target: Any = None) -> int | None:
     clean = pd.to_numeric(series, errors="coerce").dropna()
     if clean.empty:
@@ -361,6 +434,8 @@ def _score_series(series: pd.Series, kind: str, target: Any = None) -> int | Non
 
     if kind == "threshold_min":
         return _score_threshold_min(latest, float(target))
+    if kind == "threshold_max":
+        return _score_threshold_max(latest, float(target))
     if kind == "range":
         low, high = target
         return _score_range(latest, float(low), float(high))
@@ -420,6 +495,7 @@ def _build_inputs(dataset) -> pd.DataFrame:
         other_non_current_liabilities = _to_float(financials.at["Other Non-current Liabilities", year]) or 0.0
         equity = _to_float(financials.at["Equity", year])
         interest_expense = _to_float(financials.at["Interest Expense", year])
+        cfo = _to_float(financials.at["CFO (actual, optional)", year])
 
         current_assets = None
         if None not in (cash, receivables, inventory):
@@ -446,6 +522,7 @@ def _build_inputs(dataset) -> pd.DataFrame:
 
         total_debt = short_term_debt + long_term_debt
         net_debt = total_debt - (cash or 0.0) if cash is not None else None
+        enterprise_value = market_cap + total_debt - (cash or 0.0) if market_cap is not None else None
         invested_capital = total_debt + equity - cash if None not in (equity, cash) else None
         working_capital = current_assets - current_liabilities if None not in (current_assets, current_liabilities) else None
         records[year] = {
@@ -457,6 +534,7 @@ def _build_inputs(dataset) -> pd.DataFrame:
             "Pretax Income": _to_float(financials.at["Pretax Income", year]),
             "Taxes": taxes,
             "Net Income": net_income,
+            "CFO": cfo,
             "Cash": cash,
             "Receivables": receivables,
             "Inventory": inventory,
@@ -479,6 +557,7 @@ def _build_inputs(dataset) -> pd.DataFrame:
             "Market Cap": market_cap,
             "Total Debt": total_debt,
             "Net Debt": net_debt,
+            "Enterprise Value": enterprise_value,
             "Invested Capital": invested_capital,
             "Working Capital": working_capital,
         }
@@ -570,11 +649,29 @@ def _build_ratio_history(inputs: pd.DataFrame) -> pd.DataFrame:
         ratio_data.at["Asset turnover", year] = _safe_div(row["Revenue"], row["Average Assets"])
         ratio_data.at["Leverage ratio", year] = _safe_div(row["Total Assets"], row["Equity"])
 
+        market_cap = row["Market Cap"]
+        enterprise_value = row["Enterprise Value"]
+        cfo = row["CFO"]
+        net_income = row["Net Income"]
+        revenue = row["Revenue"]
+        equity = row["Equity"]
+        ebitda = row["EBITDA"]
+
+        ratio_data.at["P/E", year] = _safe_div(market_cap, net_income) if None not in (market_cap, net_income) and net_income > 0 else None
+        ratio_data.at["P/S", year] = _safe_div(market_cap, revenue) if None not in (market_cap, revenue) and revenue > 0 else None
+        ratio_data.at["P/Cash Flow", year] = _safe_div(market_cap, cfo) if None not in (market_cap, cfo) and cfo > 0 else None
+        ratio_data.at["Price / Book", year] = _safe_div(market_cap, equity) if None not in (market_cap, equity) and equity > 0 else None
+        ratio_data.at["Enterprise Value / EBITDA", year] = (
+            _safe_div(enterprise_value, ebitda) if None not in (enterprise_value, ebitda) and enterprise_value > 0 and ebitda > 0 else None
+        )
+        ratio_data.at["Enterprise Value / Sales", year] = (
+            _safe_div(enterprise_value, revenue) if None not in (enterprise_value, revenue) and enterprise_value > 0 and revenue > 0 else None
+        )
+
     return ratio_data
 
 
 def _build_category_table(category: str, ratio_history: pd.DataFrame) -> tuple[pd.DataFrame, float | None]:
-    years = list(ratio_history.columns)[::-1]
     rows = []
     scores = []
 
@@ -584,16 +681,28 @@ def _build_category_table(category: str, ratio_history: pd.DataFrame) -> tuple[p
         if score is not None:
             scores.append(float(score))
 
-        row = {
-            "Ratio": definition["label"],
-            "Mark": definition["mark"],
-            "Stars": stars_text(score) if score is not None else "n/a",
-            "Score": f"{score}/5" if score is not None else "n/a",
-        }
-        for year in years:
-            value = _to_float(series.get(year))
-            row[str(year)] = _format_value(value)
-        row["Avg"] = _format_value(_to_float(series.mean(skipna=True)))
+        if category == "Market multiples":
+            clean = pd.to_numeric(series, errors="coerce").dropna()
+            latest_value = _to_float(clean.iloc[-1]) if not clean.empty else None
+            row = {
+                "Ratio": definition["label"],
+                "Mark": definition["mark"],
+                "Current": _format_value(latest_value),
+                "Stars": stars_text(score) if score is not None else "n/a",
+                "Score": f"{score}/5" if score is not None else "n/a",
+            }
+        else:
+            years = list(ratio_history.columns)[::-1]
+            row = {
+                "Ratio": definition["label"],
+                "Mark": definition["mark"],
+                "Stars": stars_text(score) if score is not None else "n/a",
+                "Score": f"{score}/5" if score is not None else "n/a",
+            }
+            for year in years:
+                value = _to_float(series.get(year))
+                row[str(year)] = _format_value(value)
+            row["Avg"] = _format_value(_to_float(series.mean(skipna=True)))
         rows.append(row)
 
     category_table = pd.DataFrame(rows)
@@ -614,22 +723,32 @@ def build_ratio_scorecard(dataset) -> RatioScorecard:
         category_tables[category] = table
         summary_scores[category] = score
 
+    table, score = _build_category_table("Market multiples", ratio_history)
+    category_tables["Market multiples"] = table
+    summary_scores["Market multiples"] = score
+
     category_score_values = [score for score in summary_scores.values() if score is not None]
     summary_scores["Total score"] = round(sum(category_score_values) / len(category_score_values), 2) if category_score_values else None
 
     if ratio_history.loc["Altman Z score"].dropna().empty:
         notes.append("Altman Z score is only shown when Yahoo Finance provides retained earnings, total assets, total liabilities, and market capitalization for the same fiscal year.")
+    if ratio_history.loc["P/E"].dropna().empty:
+        notes.append(
+            "Market-multiple stars use explicit valuation ceilings and the current market value versus the latest annual fundamentals. If earnings, cash flow, or equity are non-positive, those rows stay `n/a`."
+        )
 
     derived_rows = [
         "Working Capital",
         "Retained Earnings",
         "Market Cap",
+        "Enterprise Value",
         "Total Debt",
         "Net Debt",
         "Invested Capital",
         "Average Invested Capital",
         "Tax Rate For NOPAT",
         "NOPAT",
+        "CFO",
         "Current Assets",
         "Current Liabilities",
         "Total Assets",

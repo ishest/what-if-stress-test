@@ -1672,8 +1672,8 @@ def render_historical(dataset):
 def render_ratio_scorecard(dataset):
     st.subheader("Financial Ratio Scorecard")
     st.caption(
-        "Ratios and stars use only Yahoo Finance annual statement data mapped by the app. "
-        "If Yahoo does not report the fields needed for a ratio, the app leaves it as `n/a`."
+        "Ratios and stars use Yahoo Finance annual statement data mapped by the app, plus Yahoo market-cap history for market multiples. "
+        "If Yahoo does not report the fields needed for a ratio or multiple, the app leaves it as `n/a`."
     )
 
     scorecard = build_ratio_scorecard(dataset)
@@ -1690,6 +1690,7 @@ def render_ratio_scorecard(dataset):
 - `min`: lower latest value versus the company's own Yahoo history gets more stars.
 - `avg`: values closer to the company's historical midpoint get more stars.
 - Numeric marks such as `1-2`, `1`, `0.20`, or `>2.99` are scored against those explicit targets.
+- Market multiples use explicit valuation ceilings, so lower current multiples get more stars.
 - Category stars are the average of the available ratio stars in that category.
 - `Total score` is the average of the available category scores.
         """
@@ -1706,7 +1707,7 @@ def render_ratio_scorecard(dataset):
     with st.expander("Ratio formulas and mark logic", expanded=False):
         st.dataframe(scorecard.formula_table, use_container_width=True, hide_index=True)
 
-    for category in ["Profitability", "Liquidity", "Credit risk", "Activity"]:
+    for category in ["Profitability", "Liquidity", "Credit risk", "Activity", "Market multiples"]:
         score = scorecard.summary_scores.get(category)
         score_label = "n/a" if score is None or pd.isna(score) else f"{score:.1f}/5"
         st.markdown(f"**{category}**")
