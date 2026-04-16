@@ -11,7 +11,7 @@ import streamlit as st
 
 from financial_ratios import CATEGORY_ORDER, build_ratio_scorecard, stars_text
 from multiples import build_multiples_snapshot
-from quarterly_charts import QuarterlyChartBundle, build_quarterly_chart_bundle
+from quarterly_charts import AnnualChartBundle, QuarterlyChartBundle, build_annual_chart_bundle, build_quarterly_chart_bundle
 from stock_scoring import build_stock_scoring_model
 from stress_backend import (
     CompanyOverview,
@@ -1040,6 +1040,16 @@ def _repair_dataset_overview(dataset, active_ticker: str):
     session_overviews = st.session_state.setdefault("last_good_overviews", {})
     best_overview = _merge_overviews(dataset.overview, session_overviews.get(active_ticker), active_ticker)
 
+    # If the cached dataset carries a thin overview object, refresh just the profile
+    # instead of rebuilding the whole financial model.
+    if _overview_score(best_overview) < 6:
+        try:
+            fresh_overview = fetch_company_overview(active_ticker)
+        except Exception:
+            fresh_overview = None
+        else:
+            best_overview = _merge_overviews(fresh_overview, best_overview, active_ticker)
+
     if best_overview is not None:
         previous_best = session_overviews.get(active_ticker)
         if _overview_score(best_overview) >= _overview_score(previous_best):
@@ -1794,11 +1804,12 @@ def _quarterly_line_chart(
 ) -> go.Figure:
     dashed_series = dashed_series or set()
     figure = go.Figure()
-    x_values = frame["Quarter"]
+    label_column = frame.columns[0]
+    x_values = frame[label_column]
     palette = px.colors.qualitative.Set2 + px.colors.qualitative.Bold
 
     for idx, column in enumerate(frame.columns):
-        if column == "Quarter":
+        if column == label_column:
             continue
         figure.add_trace(
             go.Scatter(
@@ -1829,8 +1840,9 @@ def _quarterly_line_chart(
             "y": -0.22,
             "xanchor": "left",
             "x": 0.0,
+            "font": {"size": 12},
         },
-        xaxis_title="Quarter",
+        xaxis_title=label_column,
         yaxis_title=y_title,
         template="plotly_white",
         height=430,
@@ -1841,12 +1853,65 @@ def _quarterly_line_chart(
     return figure
 
 
-def render_quarterly_charts(active_ticker: str):
+def _render_chart_grid(
+    bundle: QuarterlyChartBundle | AnnualChartBundle,
+    *,
+    prefix: str,
+    value_caption: str,
+):
+    first_row = st.columns(2)
+    with first_row[0]:
+        st.markdown(f"#### {prefix} Revenue vs Profit")
+        if bundle.revenue_profit.empty:
+            st.info("Revenue and profit chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(bundle.revenue_profit, y_title=value_caption),
+                use_container_width=True,
+                config={"displaylogo": False},
+            )
+    with first_row[1]:
+        st.markdown(f"#### {prefix} Assets and Liabilities")
+        if bundle.assets_liabilities.empty:
+            st.info("Assets and liabilities chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(
+                    bundle.assets_liabilities,
+                    y_title=value_caption,
+                    dashed_series={"Total Liabilities", "Current Liabilities", "Non-current Liabilities"},
+                ),
+                use_container_width=True,
+                config={"displaylogo": False},
+            )
+
+    second_row = st.columns(2)
+    with second_row[0]:
+        st.markdown(f"#### {prefix} Profitability - ROIC - ROE - ROA")
+        if bundle.profitability.empty:
+            st.info("Profitability returns chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(bundle.profitability, y_title="%", percent_axis=True),
+                use_container_width=True,
+                config={"displaylogo": False},
+            )
+    with second_row[1]:
+        st.markdown(f"#### {prefix} Profitability Margins")
+        if bundle.margins.empty:
+            st.info("Margin chart is unavailable for this ticker.")
+        else:
+            st.plotly_chart(
+                _quarterly_line_chart(bundle.margins, y_title="%", percent_axis=True),
+                use_container_width=True,
+                config={"displaylogo": False},
+            )
+
+
+def render_quarterly_charts(dataset, active_ticker: str):
     st.subheader("Charts")
     st.caption(
-        "These charts load separately from the main stress-test model. "
-        "Revenue, profit, assets, liabilities, and margins use the maximum available quarterly history from Yahoo Finance. "
-        "ROIC, ROE, and ROA are annualized from the latest available quarterly run-rate so all available quarters remain visible."
+        "Quarterly charts load separately from the main stress-test model, while annual charts below use the annual history already loaded in the main dataset."
     )
 
     request_key = f"quarterly_charts_requested::{active_ticker}"
@@ -1860,82 +1925,46 @@ def render_quarterly_charts(active_ticker: str):
             "Quarterly charts are kept on a separate on-demand path so they do not slow down the main app. "
             "Click `Load quarterly charts` when you want them."
         )
-        return
-
-    try:
-        with st.spinner(f"Loading quarterly Yahoo Finance data for {active_ticker}..."):
-            bundle = load_quarterly_chart_bundle(active_ticker)
-    except Exception as exc:
-        st.warning(
-            "Quarterly charts are unavailable for this ticker right now. "
-            "The main stress-test model is still separate and unaffected."
+    else:
+        st.markdown("### Quarterly")
+        st.caption(
+            "Revenue, profit, assets, liabilities, and margins use the maximum available quarterly history from Yahoo Finance. "
+            "ROIC, ROE, and ROA are annualized from the latest available quarterly run-rate so all available quarters remain visible."
         )
+
+        try:
+            with st.spinner(f"Loading quarterly Yahoo Finance data for {active_ticker}..."):
+                bundle = load_quarterly_chart_bundle(active_ticker)
+        except Exception as exc:
+            st.warning(
+                "Quarterly charts are unavailable for this ticker right now. "
+                "The main stress-test model is still separate and unaffected."
+            )
+            st.code(str(exc))
+        else:
+            if bundle.warnings:
+                with st.expander("Quarterly chart data notes", expanded=False):
+                    for note in bundle.warnings:
+                        st.write(f"- {note}")
+            _render_chart_grid(bundle, prefix="#Q", value_caption="$mm")
+
+    st.divider()
+    st.markdown("### Annual")
+    st.caption(
+        "These charts use annual statement history already loaded in the app. "
+        "The app shows four years or more whenever Yahoo provides them."
+    )
+    try:
+        annual_bundle = build_annual_chart_bundle(active_ticker, dataset.annual_raw)
+    except Exception as exc:
+        st.warning("Annual charts are unavailable for this ticker.")
         st.code(str(exc))
-        return
-
-    if bundle.warnings:
-        with st.expander("Quarterly chart data notes", expanded=False):
-            for note in bundle.warnings:
-                st.write(f"- {note}")
-
-    first_row = st.columns(2)
-    with first_row[0]:
-        st.markdown("#### #1 Revenue vs Profit")
-        if bundle.revenue_profit.empty:
-            st.info("Revenue and profit chart is unavailable for this ticker.")
-        else:
-            st.plotly_chart(
-                _quarterly_line_chart(
-                    bundle.revenue_profit,
-                    y_title="$mm",
-                ),
-                use_container_width=True,
-                config={"displaylogo": False},
-            )
-    with first_row[1]:
-        st.markdown("#### #6 Assets and Liabilities")
-        if bundle.assets_liabilities.empty:
-            st.info("Assets and liabilities chart is unavailable for this ticker.")
-        else:
-            st.plotly_chart(
-                _quarterly_line_chart(
-                    bundle.assets_liabilities,
-                    y_title="$mm",
-                    dashed_series={"Total Liabilities", "Current Liabilities", "Non-current Liabilities"},
-                ),
-                use_container_width=True,
-                config={"displaylogo": False},
-            )
-
-    second_row = st.columns(2)
-    with second_row[0]:
-        st.markdown("#### #20 Profitability - ROIC - ROE - ROA")
-        if bundle.profitability.empty:
-            st.info("Profitability returns chart is unavailable for this ticker.")
-        else:
-            st.plotly_chart(
-                _quarterly_line_chart(
-                    bundle.profitability,
-                    y_title="%",
-                    percent_axis=True,
-                ),
-                use_container_width=True,
-                config={"displaylogo": False},
-            )
-    with second_row[1]:
-        st.markdown("#### #21 Profitability Margins")
-        if bundle.margins.empty:
-            st.info("Margin chart is unavailable for this ticker.")
-        else:
-            st.plotly_chart(
-                _quarterly_line_chart(
-                    bundle.margins,
-                    y_title="%",
-                    percent_axis=True,
-                ),
-                use_container_width=True,
-                config={"displaylogo": False},
-            )
+    else:
+        if annual_bundle.warnings:
+            with st.expander("Annual chart data notes", expanded=False):
+                for note in annual_bundle.warnings:
+                    st.write(f"- {note}")
+        _render_chart_grid(annual_bundle, prefix="#A", value_caption="$mm")
 
 
 def render_selected_scenario(dataset, scenario_library: pd.DataFrame, thresholds: ThresholdSettings):
